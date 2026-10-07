@@ -4,21 +4,15 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { CreditCard, Gauge, Loader2, Lock, Save, Webhook } from "lucide-react";
 import { usePoll } from "@/hooks/use-poll";
-import { getMe, getOrg, listOrgs, listPlans, updateOrg, type Org } from "@/lib/api";
+import { getMe, getOrg, listOrgs, listPlans, updateOrg } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { EmptyState, FieldLabel } from "@/components/bits";
+import { OrgPicker } from "@/components/org-picker";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -26,7 +20,7 @@ export default function SettingsPage() {
   const { data: me, error: meError } = usePoll(useCallback(() => getMe(), []), 0);
   const isRoot = me?.kind === "root";
   // Root belongs to no org, so it picks one; a session only ever edits its own.
-  const { data: orgs } = usePoll(useCallback(() => listOrgs(), []), 0, isRoot);
+  const { data: orgs, refresh: refreshOrgs } = usePoll(useCallback(() => listOrgs(), []), 0, isRoot);
   const [orgId, setOrgId] = useState<number | null>(null);
   const chosen = orgId ?? me?.org_id ?? orgs?.[0]?.id ?? null;
 
@@ -86,31 +80,16 @@ export default function SettingsPage() {
   return (
     <div className="max-w-3xl space-y-4">
       {isRoot && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Org</CardTitle>
-            <CardDescription>
-              The bootstrap token spans every org, so pick the one to look at.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Select
-              value={chosen === null ? undefined : String(chosen)}
-              onValueChange={(v) => setOrgId(Number(v))}
-            >
-              <SelectTrigger className="w-72">
-                <SelectValue placeholder="Pick an org" />
-              </SelectTrigger>
-              <SelectContent>
-                {(orgs ?? []).map((o: Org) => (
-                  <SelectItem key={o.id} value={String(o.id)}>
-                    {o.name} <span className="text-muted-foreground">#{o.id}</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </CardContent>
-        </Card>
+        <OrgPicker
+          orgs={orgs}
+          value={chosen}
+          onChange={setOrgId}
+          onCreated={(id) => {
+            setOrgId(id);
+            refreshOrgs();
+          }}
+          description="The bootstrap token spans every org, so pick the one to look at — or create one."
+        />
       )}
 
       {(catalogue?.plans.length ?? 0) > 0 && (

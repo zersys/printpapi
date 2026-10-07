@@ -276,6 +276,16 @@ export const createUser = (email: string, password: string) =>
     (r) => r.json() as Promise<{ id: number; email: string; org_id: number }>,
   );
 
+/** Root only — an org's first (or any) account. Root belongs to no org, so it must name one. */
+export const createOrgUser = (orgId: number, email: string, password: string) =>
+  request(`/orgs/${orgId}/users`, jsonBody({ email, password })).then(
+    (r) => r.json() as Promise<{ id: number; email: string; org_id: number }>,
+  );
+
+/** Root only. */
+export const createOrg = (name: string) =>
+  request("/orgs", jsonBody({ name })).then((r) => r.json() as Promise<{ id: number; name: string }>);
+
 export const changePassword = (current: string, next: string) =>
   request("/me/password", { ...jsonBody({ current, new: next }), method: "PUT" });
 

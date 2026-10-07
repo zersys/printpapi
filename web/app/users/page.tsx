@@ -4,7 +4,15 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { KeyRound, Loader2, Lock, Trash2, UserPlus, Users } from "lucide-react";
 import { usePoll } from "@/hooks/use-poll";
-import { changePassword, createUser, deleteUser, getMe, listUsers } from "@/lib/api";
+import {
+  changePassword,
+  createOrgUser,
+  createUser,
+  deleteUser,
+  getMe,
+  listOrgs,
+  listUsers,
+} from "@/lib/api";
 import { fmtTime } from "@/lib/format";
 import { useAuth } from "@/components/auth-gate";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,6 +40,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { EmptyState, FieldLabel } from "@/components/bits";
+import { OrgPicker } from "@/components/org-picker";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -39,6 +48,13 @@ export default function UsersPage() {
   const { signOut } = useAuth();
   const { data: users, loading, error, refresh } = usePoll(listUsers, 0);
   const { data: me } = usePoll(useCallback(() => getMe(), []), 0);
+  const isRoot = me?.kind === "root";
+  // Root belongs to no org, so it picks the one to add people to; a session only has its own.
+  const { data: orgs, refresh: refreshOrgs } = usePoll(useCallback(() => listOrgs(), []), 0, isRoot);
+  const [orgId, setOrgId] = useState<number | null>(null);
+  const chosen = isRoot ? (orgId ?? orgs?.[0]?.id ?? null) : null;
+  // Root's GET /users spans every org — show the chosen one's people only.
+  const shown = isRoot ? (users ?? []).filter((u) => u.org_id === chosen) : (users ?? []);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -60,9 +76,16 @@ export default function UsersPage() {
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
+    if (isRoot && chosen === null) {
+      toast.error("Pick or create an org first");
+      return;
+    }
     setBusy(true);
     try {
-      const user = await createUser(email.trim(), password);
+      const user =
+        isRoot && chosen !== null
+          ? await createOrgUser(chosen, email.trim(), password)
+          : await createUser(email.trim(), password);
       toast.success(`Added ${user.email}`);
       setEmail("");
       setPassword("");
@@ -102,6 +125,19 @@ export default function UsersPage() {
 
   return (
     <div className="max-w-3xl space-y-4">
+      {isRoot && (
+        <OrgPicker
+          orgs={orgs}
+          value={chosen}
+          onChange={setOrgId}
+          onCreated={(id) => {
+            setOrgId(id);
+            refreshOrgs();
+          }}
+          description="The bootstrap token belongs to no org — pick the org to add people to, or create one. They can then sign in and manage it without the token."
+        />
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Add someone</CardTitle>
@@ -139,7 +175,7 @@ export default function UsersPage() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
-            <Button type="submit" variant="brand" disabled={busy}>
+            <Button type="submit" variant="brand" disabled={busy || (isRoot && chosen === null)}>
               {busy ? <Loader2 className="animate-spin" /> : <UserPlus />}
               Add
             </Button>
@@ -155,7 +191,7 @@ export default function UsersPage() {
                 <Skeleton key={i} className="h-10 w-full" />
               ))}
             </div>
-          ) : (users ?? []).length === 0 ? (
+          ) : shown.length === 0 ? (
             <EmptyState
               icon={Users}
               title="Nobody here yet"
@@ -166,13 +202,12 @@ export default function UsersPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>E-mail</TableHead>
-                  {me?.kind === "root" && <TableHead>Org</TableHead>}
                   <TableHead className="text-right">Added</TableHead>
                   <TableHead className="w-0" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(users ?? []).map((u) => (
+                {shown.map((u) => (
                   <TableRow key={u.id}>
                     <TableCell className="font-medium">
                       {u.email}
@@ -182,9 +217,6 @@ export default function UsersPage() {
                         </Badge>
                       )}
                     </TableCell>
-                    {me?.kind === "root" && (
-                      <TableCell className="font-mono text-muted-foreground">{u.org_id}</TableCell>
-                    )}
                     <TableCell className="text-right text-muted-foreground">
                       {fmtTime(u.created_at)}
                     </TableCell>
