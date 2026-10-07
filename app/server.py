@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from app import auth, billing, cloudprnt, mail, printnode, store
+from app import auth, billing, cloudprnt, envfile, mail, printnode, store
 from app.dispatch import (decode_payload, agent_mode, parse_copies, parse_callback_url,
                           parse_options, parse_expire_after, parse_idempotency_key,
                           DispatchError, FetchError, _http_get, _http_post)
@@ -1165,6 +1165,7 @@ def start_reaper(conn, *, timeout_s=300, max_retries=2, interval_s=30):
 
 
 def main():
+    envfile.load()  # ./.env, if present; real environment variables take precedence
     token = os.environ["PRINTAPI_TOKEN"]
     if not token.strip():
         # An empty bootstrap token would compare_digest-equal every missing Authorization header,

@@ -22,7 +22,9 @@ Python **standard library only** — no framework, no dependencies. HTTP handler
 
 ## Configuration
 
-Environment variables:
+Environment variables — or put them in a `.env` file in the working directory (start from
+[`.env.example`](../.env.example)); the server reads it on start, and a variable already set in the
+real environment wins:
 
 | Var | Default | Meaning |
 |---|---|---|

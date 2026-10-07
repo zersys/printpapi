@@ -27,7 +27,7 @@ up and prints it — documents **and** label printers (Zebra/ZPL, Bixolon, therm
 - **Star CloudPRNT**: Star receipt/label printers poll the server themselves — no agent, nothing
   installed at the site ([docs](docs/cloudprnt.md); built to the published spec, not yet verified
   on a physical printer)
-- Source available ([Elastic License 2.0](#license): self-host freely, don't resell it as a service) · 315 tests
+- Source available ([Elastic License 2.0](#license): self-host freely, don't resell it as a service) · 325 tests
 
 ## Get started
 
@@ -37,6 +37,8 @@ up and prints it — documents **and** label printers (Zebra/ZPL, Bixolon, therm
 git clone https://github.com/LukiPrince/printpapi && cd printpapi
 PRINTAPI_TOKEN=change-me python -m app.server
 ```
+
+Or keep the settings in a file: `cp .env.example .env`, edit it, then just `python -m app.server`.
 
 Open the dashboard at http://localhost:3460 and paste the token. Or use the prebuilt
 Docker image — no build needed (amd64 + arm64):
