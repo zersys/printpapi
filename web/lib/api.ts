@@ -49,6 +49,10 @@ export type ApiKey = {
   label: string;
   active: number;
   created_at: number;
+  /** Latest request made with the key, or an agent's latest poll; recorded to the minute. */
+  last_used_at: number | null;
+  /** The agent registered with this key, if any. */
+  used_by_agent: string | null;
 };
 
 /** Who the stored credential belongs to. `session` is an account login, `key` a machine key. */

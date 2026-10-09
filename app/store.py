@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS jobs(
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem ON jobs(org_id, idempotency_key);
 CREATE TABLE IF NOT EXISTS api_keys(
   id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, label TEXT NOT NULL,
-  key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL);
+  key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL,
+  last_used_at REAL);
 -- Account webhooks (printapi-compatible). The secret is stored in plaintext: it is sent to the target
 -- as-is on every request, so there is nothing to compare a hash against.
 CREATE TABLE IF NOT EXISTS webhooks(
@@ -106,7 +107,8 @@ def init_db(conn):
                         "CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email)",
                         "ALTER TABLE orgs ADD COLUMN job_quota INTEGER",
                         "ALTER TABLE orgs ADD COLUMN plan TEXT",
-                        "ALTER TABLE agents ADD COLUMN machine TEXT"):
+                        "ALTER TABLE agents ADD COLUMN machine TEXT",
+                        "ALTER TABLE api_keys ADD COLUMN last_used_at REAL"):
                 try:
                     conn.execute(ddl)
                 except sqlite3.OperationalError:
@@ -417,24 +419,46 @@ def add_api_key(conn, label, key, org_id=DEFAULT_ORG):
             raise
 
 
-def authenticate_client(conn, key):
-    """Resolve a client key to {'id', 'org_id'} — the org every request with it is confined to."""
+_TOUCH_EVERY_S = 60   # last_used_at is "about when", so a busy key costs one write a minute
+
+
+def authenticate_client(conn, key, now=None):
+    """Resolve a client key to {'id', 'org_id'} — the org every request with it is confined to —
+    and note that it was used (at most once a minute)."""
     if not key:
         return None
+    now = time.time() if now is None else now
     key_hash = _hash_key(key)
     # High-entropy key; sha256 lookup has no practical timing oracle (see authenticate_agent).
     with _LOCK:
-        row = conn.execute("SELECT id, org_id FROM api_keys WHERE key_hash=? AND active=1",
-                           (key_hash,)).fetchone()
-    return dict(row) if row else None
+        row = conn.execute("SELECT id, org_id, last_used_at FROM api_keys "
+                           "WHERE key_hash=? AND active=1", (key_hash,)).fetchone()
+        if row and (row["last_used_at"] is None or now - row["last_used_at"] >= _TOUCH_EVERY_S):
+            try:
+                conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?", (now, row["id"]))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    return {"id": row["id"], "org_id": row["org_id"]} if row else None
 
 
 def list_api_keys(conn, org_id=None):
     with _LOCK:
+        # An agent's key is checked against `agents` on every poll, not here — so its polls (the
+        # agent's last_seen_at) count as use too, and the listing names the agent holding it.
         rows = conn.execute(
-            "SELECT id, org_id, label, active, created_at FROM api_keys "
-            "WHERE (:org IS NULL OR org_id = :org) ORDER BY id", {"org": org_id}).fetchall()
-    return [dict(r) for r in rows]
+            "SELECT k.id, k.org_id, k.label, k.active, k.created_at, k.last_used_at, "
+            "a.name AS used_by_agent, a.last_seen_at AS agent_seen_at "
+            "FROM api_keys k LEFT JOIN agents a ON a.api_key_hash = k.key_hash "
+            "WHERE (:org IS NULL OR k.org_id = :org) ORDER BY k.id", {"org": org_id}).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        seen = [t for t in (d.pop("agent_seen_at"), d["last_used_at"]) if t is not None]
+        d["last_used_at"] = max(seen) if seen else None
+        out.append(d)
+    return out
 
 
 def revoke_api_key(conn, key_id, org_id=None):

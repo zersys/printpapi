@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { KeyRound, Loader2, Lock, Plus, ShieldOff } from "lucide-react";
 import { usePoll } from "@/hooks/use-poll";
 import { issueApiKey, listApiKeys, revokeApiKey } from "@/lib/api";
-import { fmtTime } from "@/lib/format";
+import { fmtAgo, fmtTime } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -162,6 +162,7 @@ export default function KeysPage() {
                 <TableRow>
                   <TableHead>Label</TableHead>
                   <TableHead>Created</TableHead>
+                  <TableHead>Last used</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -169,8 +170,21 @@ export default function KeysPage() {
               <TableBody>
                 {(keys ?? []).map((k) => (
                   <TableRow key={k.id}>
-                    <TableCell className="font-medium">{k.label}</TableCell>
+                    <TableCell className="font-medium">
+                      {k.label}
+                      {k.used_by_agent && (
+                        <div className="font-mono text-xs font-normal text-muted-foreground">
+                          agent: {k.used_by_agent}
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell className="text-muted-foreground">{fmtTime(k.created_at)}</TableCell>
+                    <TableCell
+                      className="text-muted-foreground"
+                      title={k.last_used_at ? fmtTime(k.last_used_at) : undefined}
+                    >
+                      {k.last_used_at ? fmtAgo(k.last_used_at) : "never"}
+                    </TableCell>
                     <TableCell>
                       <Badge variant={k.active ? "secondary" : "outline"}>
                         {k.active ? "active" : "revoked"}

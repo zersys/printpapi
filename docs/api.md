@@ -55,7 +55,7 @@ Token comparison is constant-time (`hmac.compare_digest`).
 | `GET /plans` | any | The [billing](billing.md) plan catalogue + the caller's current plan |
 | `POST /billing/webhook` | HMAC | The payment provider's callback: this org is on that plan now |
 | `POST /apikeys` | manage | Issue a client key → `{id, label, org_id, key}` (key shown once) |
-| `GET /apikeys` | manage | List keys with their org (never the secret) |
+| `GET /apikeys` | manage | List keys with their org, `last_used_at` (to the minute; an agent's polls count) and `used_by_agent` — never the secret |
 | `DELETE /apikeys/{id}` | manage | Revoke a key |
 | `POST /agent/register` | agent | Declare name + printers (+ optional `machine`) → `{computer_id, printer_ids}`. Same key + new name renames; a second online PC on one key is `409` ([agent docs](agent.md#one-key-per-pc)) |
 | `GET /agent/jobs` | agent | Long-poll for a job (204 on timeout) |
