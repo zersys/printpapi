@@ -228,7 +228,8 @@ def parse_printers(spec):
       - '= socket://host:port' -> agent opens a raw TCP socket to it.
       - '= file:///path/to/dir' -> agent writes the job into that directory (no paper).
     Append '|pdf' to declare a document printer PDF-capable; default is raw-only so a label
-    printer is never auto-sent a PDF (gotcha #1). A socket:// target is always raw-only, a
+    printer is never auto-sent a PDF (gotcha #1). '|raw' says the same explicitly - it is how
+    an `auto` list (PDF by default, see resolve_printers) turns PDF off for one printer. A socket:// target is always raw-only, a
     file:// target always takes both (a directory cannot misrender anything)."""
     out = []
     for entry in spec.split(";"):
@@ -286,16 +287,18 @@ def select_discoverer(platform=sys.platform):
 
 def resolve_printers(spec, discover):
     """agent.ini 'printers' -> entries, where an `auto` item expands to every installed printer.
-    Discovered printers are raw-only: nothing can tell a label printer from a document printer,
-    so PDF stays opt-in (gotcha #1). Explicit entries win over a discovered one of the same name,
-    so `auto ; HP LaserJet|pdf ; netz = socket://…` marks one PDF printer and adds a socket one."""
+    Discovered printers take PDF: each is a queue with a driver, so the PDF is rendered
+    (SumatraPDF / CUPS) before it reaches the printer, never sent raw (gotcha #1). An older one
+    whose driver cannot render is turned off with `|raw`. Explicit entries win over a discovered
+    one of the same name, so `auto ; Old Zebra|raw ; netz = socket://…` keeps one raw-only and
+    adds a socket printer."""
     items = [e for e in spec.split(";") if e.strip()]
     if not any(e.strip().lower() == "auto" for e in items):
         return parse_printers(spec)
     explicit = parse_printers(";".join(e for e in items if e.strip().lower() != "auto"))
     by_name = {p["name"]: p for p in explicit}
     found = discover()
-    out = [by_name.pop(n, {"name": n, "can_pdf": False, "target": n}) for n in found]
+    out = [by_name.pop(n, {"name": n, "can_pdf": True, "target": n}) for n in found]
     out += [p for p in explicit if p["name"] in by_name]
     if not out:
         raise SystemExit("printers = auto: no printers found on this computer - install one, "

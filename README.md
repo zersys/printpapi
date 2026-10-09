@@ -27,7 +27,7 @@ up and prints it — documents **and** label printers (Zebra/ZPL, Bixolon, therm
 - **Star CloudPRNT**: Star receipt/label printers poll the server themselves — no agent, nothing
   installed at the site ([docs](docs/cloudprnt.md); built to the published spec, not yet verified
   on a physical printer)
-- Source available ([Elastic License 2.0](#license): self-host freely, don't resell it as a service) · 335 tests
+- Source available ([Elastic License 2.0](#license): self-host freely, don't resell it as a service) · 336 tests
 
 ## Get started
 
@@ -61,11 +61,11 @@ Prefer to build it yourself? `docker build -t printpapi .`
    server_url = http://yourserver:3460
    api_key    = your-agent-key
    name       = auto
-   printers   = auto ; HP LaserJet|pdf
+   printers   = auto
    ```
 
-   `auto` uses this computer's name and every installed printer (raw-only); `|pdf` marks the
-   ones that should get PDFs. See [docs/agent.md](docs/agent.md#printer-syntax).
+   `auto` uses this computer's name and every installed printer, PDF and raw alike; mark an
+   older printer whose driver can't render PDFs with `|raw` (`auto ; Old Zebra|raw`). See [docs/agent.md](docs/agent.md#printer-syntax).
 3. Run `python print_agent.py`.
 
 First print: dashboard → **Devices** → **Test print**.

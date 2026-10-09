@@ -815,21 +815,27 @@ def test_resolve_printers_without_auto_is_parse_printers():
         print_agent.parse_printers(spec)
 
 
-def test_resolve_printers_auto_is_raw_only_by_default():
-    # Discovery cannot tell a label printer from a document printer, so nothing found that way
-    # is ever sent a PDF (gotcha #1) unless the ini says so.
+def test_resolve_printers_auto_takes_pdf_by_default():
+    # A discovered printer is an installed queue with a driver behind it, so a PDF is rendered
+    # (SumatraPDF / CUPS) before it reaches the printer - never sent raw (gotcha #1).
     assert print_agent.resolve_printers("auto", lambda: ["Zebra", "HP"]) == [
-        {"name": "Zebra", "can_pdf": False, "target": "Zebra"},
-        {"name": "HP", "can_pdf": False, "target": "HP"}]
+        {"name": "Zebra", "can_pdf": True, "target": "Zebra"},
+        {"name": "HP", "can_pdf": True, "target": "HP"}]
 
 
-def test_resolve_printers_explicit_entries_override_and_extend_auto():
+def test_resolve_printers_raw_tag_turns_pdf_off_for_an_older_printer():
     got = print_agent.resolve_printers(
-        "AUTO ; HP|pdf ; netz = socket://10.0.0.5:9100", lambda: ["Zebra", "HP"])
+        "AUTO ; Zebra|raw ; netz = socket://10.0.0.5:9100", lambda: ["Zebra", "HP"])
     assert got == [
         {"name": "Zebra", "can_pdf": False, "target": "Zebra"},
         {"name": "HP", "can_pdf": True, "target": "HP"},
         {"name": "netz", "can_pdf": False, "target": "socket://10.0.0.5:9100"}]
+
+
+def test_parse_printers_raw_tag_is_raw_only():
+    assert print_agent.parse_printers("Zebra|raw ; Old|RAW") == [
+        {"name": "Zebra", "can_pdf": False, "target": "Zebra"},
+        {"name": "Old", "can_pdf": False, "target": "Old"}]
 
 
 def test_resolve_printers_auto_finding_nothing_is_a_clear_error():

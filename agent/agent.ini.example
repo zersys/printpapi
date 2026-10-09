@@ -14,10 +14,11 @@ api_key = your-agent-key
 ; to it on first contact.)
 name = auto
 
-; Semicolon-separated printers:  name [|pdf] [= target]   - or auto
+; Semicolon-separated printers:  name [|pdf|raw] [= target]   - or auto
 ;   auto                    -> every printer installed here (virtual ones like Microsoft Print
-;                              to PDF skipped), raw-only. Leaving the line out means auto too.
-;                              Entries after it override or add: auto ; HP LaserJet|pdf
+;                              to PDF skipped), taking PDF and raw. Leaving the line out means
+;                              auto too. Entries after it override or add - |raw turns PDF off
+;                              for an older printer whose driver can't render: auto ; Old Zebra|raw
 ;   plain name              -> a Windows printer name or a CUPS queue (Linux/macOS)
 ;   |pdf                    -> this printer can render PDFs. Default is raw-only, so a label
 ;                              printer is never sent a PDF by accident (it would print blanks).
@@ -26,7 +27,7 @@ name = auto
 ;   = file:///path/to/dir   -> "virtual print server": the job is written into that directory
 ;                              (job-<id>.pdf / .prn) instead of printed. Takes pdf and raw.
 ;                              Windows: file:///C:/printpapi/out
-printers = auto ; HP LaserJet|pdf ; warehouse-label = socket://192.168.1.50:9100
+printers = auto ; warehouse-label = socket://192.168.1.50:9100
 
 ; Optional: socket timeout per request in seconds (default 60, minimum 30 - the server
 ; long-polls 25 s). Guards against a NAT flow that is silently dropped mid-poll.

@@ -49,7 +49,8 @@ server_url = ${origin}
 api_key = <your agent key>
 ; auto = this computer's name
 name = auto
-; auto = every installed printer, label-safe (no PDFs). To send PDFs to one, add it with |pdf.
+; auto = every installed printer, PDF and raw. An older printer that can't print PDFs:
+;   printers = auto ; Old Zebra|raw
 ; Not installed here? Add a network printer: netz = socket://192.168.1.50:9100
 printers = auto`;
 

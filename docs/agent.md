@@ -29,8 +29,8 @@ server_url = http://yourserver:3460
 api_key    = your-agent-key
 ; auto = this computer's name (unset = "agent")
 name       = auto
-; auto = every installed printer, raw-only. Add entries after it to mark a PDF printer or add
-; one that isn't installed: auto ; HP LaserJet|pdf ; warehouse-label = socket://192.168.1.50:9100
+; auto = every installed printer, PDF and raw. Entries after it turn PDF off for an older
+; printer or add one that isn't installed: auto ; Old Zebra|raw ; warehouse-label = socket://192.168.1.50:9100
 printers   = auto
 ```
 
@@ -63,19 +63,21 @@ proxy in front: `/agent/register` enrolls an unknown key into the default org (s
 
 ### Printer syntax
 
-`name [|pdf] [= target]`, semicolon-separated — or `auto`:
+`name [|pdf|raw] [= target]`, semicolon-separated — or `auto`:
 
 - `auto` (or no `printers` line at all) → every printer installed on this machine: Windows
   local printers and network connections, or every CUPS queue (`lpstat -e`). Virtual ones that
   pop up a dialog (Microsoft Print to PDF, XPS Document Writer, Fax, OneNote) are skipped.
-  Discovered printers are **raw-only** — nothing can tell a label printer from a document
-  printer — so list a document printer again with `|pdf` to send it PDFs. Explicit entries
-  override a discovered one of the same name and add any that aren't installed (`socket://`,
-  `file://`): `printers = auto ; HP LaserJet|pdf ; netz = socket://192.168.1.50:9100`.
-
+  Discovered printers take **PDF and raw**: each is a queue with a driver, so a PDF is rendered
+  (SumatraPDF / CUPS) before it reaches the printer. If an older printer's driver can't render
+  PDFs, turn it off with `|raw`. Explicit entries override a discovered one of the same name and
+  add any that aren't installed (`socket://`, `file://`):
+  `printers = auto ; Old Zebra|raw ; netz = socket://192.168.1.50:9100`. A Windows printer on
+  the *Generic / Text Only* driver, or a raw CUPS queue, cannot render — give it `|raw`.
 - Plain name → a Windows printer name or CUPS queue; jobs print through it.
-- `|pdf` → declares the printer PDF-capable. **Default is raw-only**, so a label printer is
-  never sent a PDF by accident.
+- `|pdf` → declares the printer PDF-capable. **A name listed without `auto` is raw-only by
+  default**, so a label printer is never sent a PDF by accident.
+- `|raw` → raw-only, said explicitly — how an `auto` list turns PDF off for one printer.
 - `= socket://host:port` → the agent opens a raw TCP socket (e.g. a network label printer's
   `:9100`). Always raw-only — a bare socket has no renderer.
 - `= file:///path/to/dir` → the agent writes the job into that directory instead of printing it
