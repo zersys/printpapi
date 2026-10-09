@@ -9,10 +9,15 @@ server_url = http://yourserver:3460
 ; contact, so nobody else can register under it.
 api_key = your-agent-key
 
-; How this machine shows up on the Devices page.
-name = office-pc
+; How this machine shows up on the Devices page. auto = this computer's name.
+; (Left out it is "agent" - an existing install keeps its name, since the server binds the key
+; to it on first contact.)
+name = auto
 
-; Semicolon-separated printers:  name [|pdf] [= target]
+; Semicolon-separated printers:  name [|pdf] [= target]   - or auto
+;   auto                    -> every printer installed here (virtual ones like Microsoft Print
+;                              to PDF skipped), raw-only. Leaving the line out means auto too.
+;                              Entries after it override or add: auto ; HP LaserJet|pdf
 ;   plain name              -> a Windows printer name or a CUPS queue (Linux/macOS)
 ;   |pdf                    -> this printer can render PDFs. Default is raw-only, so a label
 ;                              printer is never sent a PDF by accident (it would print blanks).
@@ -21,7 +26,7 @@ name = office-pc
 ;   = file:///path/to/dir   -> "virtual print server": the job is written into that directory
 ;                              (job-<id>.pdf / .prn) instead of printed. Takes pdf and raw.
 ;                              Windows: file:///C:/printpapi/out
-printers = Zebra GK420d ; HP LaserJet|pdf ; warehouse-label = socket://192.168.1.50:9100
+printers = auto ; HP LaserJet|pdf ; warehouse-label = socket://192.168.1.50:9100
 
 ; Optional: socket timeout per request in seconds (default 60, minimum 30 - the server
 ; long-polls 25 s). Guards against a NAT flow that is silently dropped mid-poll.

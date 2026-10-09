@@ -758,3 +758,99 @@ def test_dunder_main_logs_a_bad_agent_ini_before_exiting(monkeypatch, tmp_path):
 
     text = (tmp_path / "print_agent-error.log").read_text(encoding="utf-8")
     assert "exit: missing or invalid" in text
+
+
+# --- auto-discovery: `name = auto`, `printers = auto` -----------------------------------------
+
+class FakeWin32Print:
+    """EnumPrinters(flags, None, 2) -> PRINTER_INFO_2 dicts, as pywin32 returns them."""
+    PRINTER_ENUM_LOCAL, PRINTER_ENUM_CONNECTIONS = 2, 4
+
+    def __init__(self, printers):
+        self.printers, self.flags = printers, None
+
+    def EnumPrinters(self, flags, name, level):
+        assert level == 2
+        self.flags = flags
+        return [{"pPrinterName": n, "pPortName": port} for n, port in self.printers]
+
+
+def test_discover_windows_lists_local_and_connected_printers_minus_virtual_ones():
+    wp = FakeWin32Print([
+        ("ZDesigner GK420d", "USB001"),
+        ("EPSON TM-T(180dpi) Receipt6", "ESDPRT001"),
+        ("\\\\srv\\HP LaserJet", "\\\\srv\\HP LaserJet"),       # a shared network connection
+        ("Microsoft Print to PDF", "PORTPROMPT:"),             # opens a Save-As dialog
+        ("Microsoft XPS Document Writer", "PORTPROMPT:"),
+        ("Fax", "SHRFAX:"),
+        ("OneNote (Desktop)", "nul:"),
+        ("Send To OneNote 2016", "nul:"),
+    ])
+    assert print_agent.discover_printers_windows(wp) == [
+        "ZDesigner GK420d", "EPSON TM-T(180dpi) Receipt6", "\\\\srv\\HP LaserJet"]
+    assert wp.flags == 2 | 4
+
+
+def test_discover_cups_reads_lpstat_e():
+    class R:
+        stdout = b"Zebra_GK420d\nHP_LaserJet\n\n"
+    seen = {}
+
+    def run(cmd, **kw):
+        seen["cmd"] = cmd
+        return R()
+    assert print_agent.discover_printers_cups(run) == ["Zebra_GK420d", "HP_LaserJet"]
+    assert seen["cmd"] == ["lpstat", "-e"]
+
+
+def test_discover_cups_without_cups_finds_nothing():
+    def run(cmd, **kw):
+        raise FileNotFoundError("lpstat")
+    assert print_agent.discover_printers_cups(run) == []
+
+
+def test_resolve_printers_without_auto_is_parse_printers():
+    spec = "Zebra ; HP|pdf ; netz = socket://10.0.0.5:9100"
+    assert print_agent.resolve_printers(spec, lambda: ["never called"]) == \
+        print_agent.parse_printers(spec)
+
+
+def test_resolve_printers_auto_is_raw_only_by_default():
+    # Discovery cannot tell a label printer from a document printer, so nothing found that way
+    # is ever sent a PDF (gotcha #1) unless the ini says so.
+    assert print_agent.resolve_printers("auto", lambda: ["Zebra", "HP"]) == [
+        {"name": "Zebra", "can_pdf": False, "target": "Zebra"},
+        {"name": "HP", "can_pdf": False, "target": "HP"}]
+
+
+def test_resolve_printers_explicit_entries_override_and_extend_auto():
+    got = print_agent.resolve_printers(
+        "AUTO ; HP|pdf ; netz = socket://10.0.0.5:9100", lambda: ["Zebra", "HP"])
+    assert got == [
+        {"name": "Zebra", "can_pdf": False, "target": "Zebra"},
+        {"name": "HP", "can_pdf": True, "target": "HP"},
+        {"name": "netz", "can_pdf": False, "target": "socket://10.0.0.5:9100"}]
+
+
+def test_resolve_printers_auto_finding_nothing_is_a_clear_error():
+    with pytest.raises(SystemExit, match="no printers found"):
+        print_agent.resolve_printers("auto", lambda: [])
+
+
+def test_agent_name_auto_is_the_computer_name(tmp_path):
+    assert print_agent.agent_name(_ini(tmp_path, "name = auto\n"), hostname=lambda: "OFFICE-PC") \
+        == "OFFICE-PC"
+    assert print_agent.agent_name(_ini(tmp_path, "name = till-2\n"), hostname=lambda: "x") \
+        == "till-2"
+
+
+def test_agent_name_missing_stays_agent_for_existing_installs(tmp_path):
+    # The server binds an agent key to its name on first contact; renaming an existing install
+    # on upgrade would answer 409 "agent key already in use". Auto-naming is opt-in.
+    assert print_agent.agent_name(_ini(tmp_path), hostname=lambda: "OFFICE-PC") == "agent"
+
+
+def test_printers_line_may_be_omitted_and_means_auto(tmp_path):
+    (tmp_path / "agent.ini").write_text("[agent]\nserver_url=https://x\napi_key=k\n")
+    cfg = print_agent.load_config(str(tmp_path))
+    assert print_agent.printers_spec(cfg) == "auto"

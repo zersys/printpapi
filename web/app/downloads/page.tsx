@@ -47,11 +47,11 @@ export default function DownloadsPage() {
   const ini = `[agent]
 server_url = ${origin}
 api_key = <your agent key>
-name = office-pc
-; printers: semicolon-separated. Append |pdf for document printers.
-; A CUPS queue / Windows printer name, socket://IP:PORT for a raw network printer,
-; or file:///path/to/dir to write the job to disk instead of printing it.
-printers = Zebra GK420d ; HP LaserJet|pdf ; netz-bixolon = socket://192.168.1.50:9100`;
+; auto = this computer's name
+name = auto
+; auto = every installed printer, label-safe (no PDFs). To send PDFs to one, add it with |pdf.
+; Not installed here? Add a network printer: netz = socket://192.168.1.50:9100
+printers = auto`;
 
   return (
     <div className="max-w-3xl space-y-4">

@@ -29,7 +29,7 @@ real environment wins:
 | Var | Default | Meaning |
 |---|---|---|
 | `PRINTAPI_TOKEN` | *(required)* | Bootstrap/admin token — treat like a password |
-| `PRINT_DB` | `printpapi.db` | SQLite database path |
+| `PRINT_DB` | `printpapi.db` | SQLite database path. Use an absolute path outside the code checkout — a relative one follows the start directory, so a deploy into a fresh release folder starts on an empty DB |
 | `PRINT_PORT` | `3460` | Listen port |
 | `LOG_REQUESTS` | *(off)* | Set to log every HTTP request |
 | `PRINTAPI_SIGNUP` | `closed` | `open` lets anyone create an org via `POST /signup` — for a hosted deployment, not a private box |

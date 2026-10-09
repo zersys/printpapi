@@ -255,6 +255,66 @@ def parse_printers(spec):
     return out
 
 
+# Windows "printers" that are really dialogs or apps: a job sent to one waits forever for a click.
+# ponytail: matched by port (Print to PDF / XPS = PORTPROMPT:, Fax = SHRFAX:, OneNote = nul:) plus a
+# name prefix for OneNote variants on other ports. Add to the list if another one turns up.
+_VIRTUAL_PORTS = {"PORTPROMPT:", "SHRFAX:", "NUL:"}
+
+
+def discover_printers_windows(wp=None):
+    """Names of the installed printers (local + connected network shares), virtual ones skipped."""
+    if wp is None:
+        import win32print as wp
+    found = wp.EnumPrinters(wp.PRINTER_ENUM_LOCAL | wp.PRINTER_ENUM_CONNECTIONS, None, 2)
+    return [p["pPrinterName"] for p in found
+            if (p.get("pPortName") or "").upper() not in _VIRTUAL_PORTS
+            and "onenote" not in p["pPrinterName"].lower()]
+
+
+def discover_printers_cups(run=subprocess.run):
+    """CUPS destinations (`lpstat -e`, Linux and macOS). No CUPS -> nothing found."""
+    try:
+        r = run(["lpstat", "-e"], capture_output=True, check=True, timeout=10)
+    except Exception:
+        return []
+    return [line.strip() for line in r.stdout.decode(errors="replace").splitlines() if line.strip()]
+
+
+def select_discoverer(platform=sys.platform):
+    return discover_printers_windows if platform.startswith("win") else discover_printers_cups
+
+
+def resolve_printers(spec, discover):
+    """agent.ini 'printers' -> entries, where an `auto` item expands to every installed printer.
+    Discovered printers are raw-only: nothing can tell a label printer from a document printer,
+    so PDF stays opt-in (gotcha #1). Explicit entries win over a discovered one of the same name,
+    so `auto ; HP LaserJet|pdf ; netz = socket://…` marks one PDF printer and adds a socket one."""
+    items = [e for e in spec.split(";") if e.strip()]
+    if not any(e.strip().lower() == "auto" for e in items):
+        return parse_printers(spec)
+    explicit = parse_printers(";".join(e for e in items if e.strip().lower() != "auto"))
+    by_name = {p["name"]: p for p in explicit}
+    found = discover()
+    out = [by_name.pop(n, {"name": n, "can_pdf": False, "target": n}) for n in found]
+    out += [p for p in explicit if p["name"] in by_name]
+    if not out:
+        raise SystemExit("printers = auto: no printers found on this computer - install one, "
+                         "or list them in agent.ini")
+    return out
+
+
+def printers_spec(agent_cfg):
+    """The 'printers' line; left out it means auto."""
+    return agent_cfg.get("printers", "").strip() or "auto"
+
+
+def agent_name(agent_cfg, hostname=socket.gethostname):
+    """`name = auto` -> this computer's name. Unset stays "agent": the server binds a key to its
+    name on first contact, so silently renaming an existing install would lock it out (409)."""
+    name = agent_cfg.get("name", "agent").strip() or "agent"
+    return hostname() if name.lower() == "auto" else name
+
+
 def _req(url, key, *, data=None, method="GET", as_bytes=False):
     r = urllib.request.Request(url, data=data, method=method)
     for name, value in _HTTP["headers"].items():
@@ -407,7 +467,7 @@ def load_config(base_dir):
     cfg = configparser.ConfigParser()
     if not cfg.read(ini) or "agent" not in cfg:
         raise SystemExit(
-            f"missing or invalid {ini}: need an [agent] section with server_url, api_key, printers")
+            f"missing or invalid {ini}: need an [agent] section with server_url and api_key")
     return cfg["agent"]
 
 
@@ -465,11 +525,11 @@ def main():
     configure_http(*http_settings(agent_cfg))
     base = agent_cfg["server_url"].rstrip("/")
     key = agent_cfg["api_key"]
-    name = agent_cfg.get("name", "agent")
+    name = agent_name(agent_cfg)
     bundled = os.path.join(base_dir, "SumatraPDF.exe")
     sumatra = bundled if os.path.exists(bundled) else "SumatraPDF.exe"
     raw_fn, pdf_fn = select_backend(sumatra=sumatra)
-    printers = parse_printers(agent_cfg["printers"])
+    printers = resolve_printers(printers_spec(agent_cfg), select_discoverer())
     add_capabilities(printers, select_caps_collector())
     reg = register_with_retry(base, key, name, printers)
     entry_by_name = {p["name"]: p for p in printers}

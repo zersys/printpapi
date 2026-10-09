@@ -19,15 +19,19 @@ only** — nothing listens on the printer's machine, so NAT/firewalls are no pro
 
 ## agent.ini
 
+`name = auto` registers under this computer's name. Leaving `name` out keeps the old default,
+`agent`: the server binds a key to its name on first contact, so an existing install that is
+silently renamed would be refused (`409`).
+
 ```ini
 [agent]
 server_url = http://yourserver:3460
 api_key    = your-agent-key
-name       = office-pc
-; printers: semicolon-separated. Append |pdf for document printers.
-; A CUPS queue / Windows printer name, socket://IP:PORT for a raw network printer,
-; or file:///path/to/dir to archive the job to disk instead of printing it.
-printers   = Zebra GK420d ; HP LaserJet|pdf ; warehouse-label = socket://192.168.1.50:9100
+; auto = this computer's name (unset = "agent")
+name       = auto
+; auto = every installed printer, raw-only. Add entries after it to mark a PDF printer or add
+; one that isn't installed: auto ; HP LaserJet|pdf ; warehouse-label = socket://192.168.1.50:9100
+printers   = auto
 ```
 
 ### Optional: timeout and extra headers
@@ -59,7 +63,15 @@ proxy in front: `/agent/register` enrolls an unknown key into the default org (s
 
 ### Printer syntax
 
-`name [|pdf] [= target]`, semicolon-separated:
+`name [|pdf] [= target]`, semicolon-separated — or `auto`:
+
+- `auto` (or no `printers` line at all) → every printer installed on this machine: Windows
+  local printers and network connections, or every CUPS queue (`lpstat -e`). Virtual ones that
+  pop up a dialog (Microsoft Print to PDF, XPS Document Writer, Fax, OneNote) are skipped.
+  Discovered printers are **raw-only** — nothing can tell a label printer from a document
+  printer — so list a document printer again with `|pdf` to send it PDFs. Explicit entries
+  override a discovered one of the same name and add any that aren't installed (`socket://`,
+  `file://`): `printers = auto ; HP LaserJet|pdf ; netz = socket://192.168.1.50:9100`.
 
 - Plain name → a Windows printer name or CUPS queue; jobs print through it.
 - `|pdf` → declares the printer PDF-capable. **Default is raw-only**, so a label printer is
