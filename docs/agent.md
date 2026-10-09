@@ -36,6 +36,12 @@ two PCs apart:
 - same key from a new PC once the old one is **offline** → it takes the key over (a replaced
   machine: copy the agent folder across and start it).
 
+**The printer list is what the agent reports now.** On every start the agent registers its
+current printers; one it no longer reports (uninstalled, renamed, its share disconnected) is marked
+*removed*: hidden from the Devices page and `/printers`, and new jobs for it are refused with
+`400 printer N was removed from its computer`. Its job history stays, and if it comes back it gets
+its old id again. The list is read at start-up, so restart the agent after changing printers.
+
 The machine id identifies, it does not authenticate — it is easy to fake, so the key stays the
 only credential. A PC that cannot read its id still registers; it just isn't checked.
 

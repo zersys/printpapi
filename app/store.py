@@ -337,8 +337,8 @@ def register_agent(conn, name, api_key, printers, org_id=DEFAULT_ORG, machine=No
                                  (agent_id, p["name"])).fetchone()
                 if r:
                     pid = r["id"]
-                    conn.execute("UPDATE printers SET can_pdf=?, capabilities=? WHERE id=?",
-                                 (can_pdf, caps, pid))
+                    conn.execute("UPDATE printers SET can_pdf=?, capabilities=?, state='active' "
+                                 "WHERE id=?", (can_pdf, caps, pid))
                 else:
                     cur = conn.execute(
                         "INSERT INTO printers(org_id, agent_id, name, can_pdf, capabilities, "
@@ -346,6 +346,14 @@ def register_agent(conn, name, api_key, printers, org_id=DEFAULT_ORG, machine=No
                         (org_id, agent_id, p["name"], can_pdf, caps, now))
                     pid = cur.lastrowid
                 printer_ids[p["name"]] = pid
+            # What the agent reports now is what the PC has. The rest are marked removed, not
+            # deleted: their job history keeps its printer name, and one that comes back (a
+            # re-installed driver, a reconnected share) gets its old id — and with it every
+            # integration that stored that id.
+            keep = list(printer_ids.values())
+            conn.execute("UPDATE printers SET state='removed' WHERE agent_id=? AND state='active'"
+                         + (f" AND id NOT IN ({','.join('?' * len(keep))})" if keep else ""),
+                         (agent_id, *keep))     # (`NOT IN (NULL)` would match nothing at all)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -666,7 +674,7 @@ def get_printer(conn, printer_id, org_id=None):
     """One printer, org-filtered — another org's printer reads as missing, never as a 403."""
     with _LOCK:
         row = conn.execute("SELECT id, name, org_id, agent_id, can_pdf FROM printers "
-                           "WHERE id=:pid AND (:org IS NULL OR org_id = :org)",
+                           "WHERE id=:pid AND state='active' AND (:org IS NULL OR org_id = :org)",
                            {"pid": printer_id, "org": org_id}).fetchone()
     return dict(row, can_pdf=bool(row["can_pdf"])) if row else None
 
@@ -678,11 +686,14 @@ def enqueue_job(conn, printer_id, type_, mode, payload, user_id=DEFAULT_USER, ti
     with _LOCK:
         try:
             # A foreign printer is simply unknown — same error as a nonexistent one, no leak.
-            p = conn.execute("SELECT org_id, agent_id FROM printers "
+            p = conn.execute("SELECT org_id, agent_id, state FROM printers "
                              "WHERE id=:pid AND (:org IS NULL OR org_id = :org)",
                              {"pid": printer_id, "org": org_id}).fetchone()
             if p is None:
                 raise UnknownPrinter(f"unknown printer: {printer_id}")
+            if p["state"] != "active":
+                raise UnknownPrinter(f"printer {printer_id} was removed from its computer "
+                                     f"(its agent no longer reports it)")
             if idempotency_key is not None:
                 # A retried submit returns the original job — the same key never prints twice in an
                 # org. The lookup is safe under the global write lock; the UNIQUE index enforces it.
@@ -930,8 +941,8 @@ def metrics(conn, online_window_s, now=None, org_id=None):
                                org).fetchall()
         seen = [r["last_seen_at"] for r in conn.execute(
             "SELECT last_seen_at FROM agents WHERE (:org IS NULL OR org_id = :org)", org).fetchall()]
-        printers = conn.execute("SELECT COUNT(*) c FROM printers "
-                                "WHERE (:org IS NULL OR org_id = :org)", org).fetchone()["c"]
+        printers = conn.execute("SELECT COUNT(*) c FROM printers WHERE state = 'active' "
+                                "AND (:org IS NULL OR org_id = :org)", org).fetchone()["c"]
     online = sum(1 for s in seen if s is not None and (now - s) <= online_window_s)
     return {"jobs": {r["state"]: r["c"] for r in jobrows},
             "agents_total": len(seen), "agents_online": online, "printers_total": printers}
@@ -943,7 +954,8 @@ def list_agents(conn, online_window_s, now=None, org_id=None):
     with _LOCK:
         rows = conn.execute(
             "SELECT a.id, a.name, a.last_seen_at, a.created_at, a.machine, "
-            "(SELECT COUNT(*) FROM printers p WHERE p.agent_id = a.id) AS printers "
+            "(SELECT COUNT(*) FROM printers p WHERE p.agent_id = a.id AND p.state = 'active') "
+            "AS printers "
             "FROM agents a WHERE (:org IS NULL OR a.org_id = :org) ORDER BY a.id",
             {"org": org_id}).fetchall()
     return [{"id": r["id"], "name": r["name"], "last_seen_at": r["last_seen_at"],
@@ -994,7 +1006,8 @@ def list_printers(conn, online_window_s, now=None, org_id=None):
             "SELECT p.id, p.name, p.agent_id, p.can_pdf, p.capabilities, p.created_at, "
             "a.name AS agent_name, a.last_seen_at "
             "FROM printers p JOIN agents a ON a.id = p.agent_id "
-            "WHERE (:org IS NULL OR p.org_id = :org) ORDER BY p.id", {"org": org_id}).fetchall()
+            "WHERE p.state = 'active' AND (:org IS NULL OR p.org_id = :org) ORDER BY p.id",
+            {"org": org_id}).fetchall()
     out = []
     for r in rows:
         seen = r["last_seen_at"]
