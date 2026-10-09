@@ -1,11 +1,11 @@
 # printpapi — self-hosted PrintNode alternative. Elastic License 2.0 (see LICENSE).
-"""PrintNode-compatible API layer.
+"""printapi: the compatible cloud-print API layer.
 
-The same server and the same job store, dressed in the JSON shapes PrintNode's clients expect, so
+The same server and the same job store, dressed in the JSON shapes existing cloud-print clients expect, so
 an existing plugin or SDK can be pointed at a printpapi base URL and keep working.
 
-It is selected by *auth scheme*: PrintNode carries the API key as the HTTP Basic username, so a
-`Basic` header means "answer in PrintNode's shapes" and `Bearer` keeps printpapi's own. That lets
+It is selected by *auth scheme*: those clients carry the API key as the HTTP Basic username, so a
+`Basic` header means "answer in the compatible shapes" and `Bearer` keeps printpapi's own. That lets
 `/printers` and `/computers` serve both shapes without a URL prefix — which matters, because the
 SDKs let you override the host but not the paths.
 
@@ -28,7 +28,7 @@ class CompatError(Exception):
 
 
 def basic_key(header):
-    """The API key out of an `Authorization: Basic` header. PrintNode's clients send the key as the
+    """The API key out of an `Authorization: Basic` header. Compatible clients send the key as the
     username with an empty password, so only the username half matters. `''` if unusable."""
     if not header.startswith("Basic "):
         return ""
@@ -40,7 +40,7 @@ def basic_key(header):
 
 
 def _iso(ts):
-    """Epoch seconds -> the ISO-8601 UTC millisecond form PrintNode timestamps use."""
+    """Epoch seconds -> the ISO-8601 UTC millisecond form the compatible API uses."""
     if ts is None:
         return None
     return (datetime.fromtimestamp(ts, timezone.utc)
@@ -51,7 +51,7 @@ _MAX_SET = 500   # stays clear of SQLite's bound-parameter limit (999 on builds 
 
 
 def parse_set(spec):
-    """PrintNode addresses collections by id set in the path: `10`, `10,12`, `5-9`, or a mix.
+    """The compatible API addresses collections by id set in the path: `10`, `10,12`, `5-9`, or a mix.
     Bounded: a range is a shorthand for a handful of ids, not an invitation to materialise
     `1-999999999`."""
     ids = []
@@ -71,7 +71,7 @@ def parse_set(spec):
 
 
 def capabilities(caps):
-    """Agent-reported capabilities -> PrintNode's capability object. What the agent cannot discover
+    """Agent-reported capabilities -> the compatible capability object. What the agent cannot discover
     is reported empty instead of invented — paper *dimensions* in particular: we know the names, not
     the micrometre extents, so every paper maps to null."""
     if not caps:
@@ -93,7 +93,7 @@ def capabilities(caps):
 
 
 def computer(agent):
-    """A `store.list_agents()` row -> PrintNode computer object. The network fields are null: our
+    """A `store.list_agents()` row -> compatible computer object. The network fields are null: our
     agent reports its name and its printers, not its interfaces."""
     return {"id": agent["id"], "name": agent["name"], "inet": None, "inet6": None,
             "hostname": agent["name"], "version": "", "jre": None,
@@ -102,7 +102,7 @@ def computer(agent):
 
 
 def printer(p, comp=None):
-    """A `store.list_printers()` row (plus its computer object) -> PrintNode printer object."""
+    """A `store.list_printers()` row (plus its computer object) -> compatible printer object."""
     return {"id": p["id"], "name": p["name"], "description": p["name"],
             "computer": comp or {"id": p["agent_id"], "name": p["agent_name"],
                                  "state": "connected" if p["online"] else "disconnected"},
@@ -115,7 +115,7 @@ _STATES = {"queued": "queued", "claimed": "sent", "done": "done", "cancelled": "
 
 
 def job_state(state, error=None):
-    """Our job state -> PrintNode's. `failed` splits in two over there (a missed deadline is
+    """Our job state -> the compatible one. `failed` splits in two over there (a missed deadline is
     `expired`), and a cancelled job is `deleted` — they have no separate cancelled state."""
     if state == "failed":
         return "expired" if error == "expired" else "error"
@@ -127,7 +127,7 @@ _SOURCE = "printpapi"
 
 
 def printjob(job, printer_obj=None):
-    """A `store.recent_jobs()` row -> PrintNode print job object."""
+    """A `store.recent_jobs()` row -> compatible print job object."""
     return {"id": job["id"],
             "printer": printer_obj or {"id": job["printer_id"], "name": job["printer_name"]},
             "title": job["title"] or "", "contentType": job["type"], "source": _SOURCE,
@@ -136,7 +136,7 @@ def printjob(job, printer_obj=None):
 
 
 def printjob_states(job):
-    """The per-job state *history* PrintNode reports. We keep only the current state, so this is a
+    """The per-job state *history* the compatible API reports. We keep only the current state, so this is a
     single entry — enough for the clients that poll it waiting for a terminal state."""
     return [{"printJobId": job["id"], "state": job_state(job["state"], job["error"]),
              "message": job["error"] or "", "clientVersion": "",
@@ -158,7 +158,7 @@ _OPTIONS = ("paper", "bin", "color", "duplex", "pages")   # the subset the agent
 
 
 def job_body(pn):
-    """A PrintNode `POST /printjobs` body -> a printpapi `POST /jobs` body.
+    """A compatible `POST /printjobs` body -> a printpapi `POST /jobs` body.
 
     Unknown option keys are dropped rather than rejected, and options on a raw job are dropped
     whole: a plugin sends its entire option set (rotate, dpi, fit_to_page, …) with every job, and a
@@ -184,3 +184,48 @@ def job_body(pn):
         if keep:
             body["options"] = keep
     return body
+
+
+# --- account webhooks ---------------------------------------------------------------------------
+
+def webhook(w):
+    """A `store.list_webhooks()` row -> the compatible webhook object. Their per-timescale decay
+    counters (exp5m, exp1h, exp1d, exp7d) are left out: we keep the straight counts only."""
+    return {"webhookId": w["id"], "url": w["url"], "secret": w["secret"],
+            "messages": w["messages"],
+            "counts": {"receivedEvents": w["received_events"],
+                       "droppedEvents": w["dropped_events"],
+                       "successfulRequests": w["successful_requests"],
+                       "failedRequests": w["failed_requests"]}}
+
+
+# A webhook only ever carries their *stable* print job states; `cancelled` and a requeue never
+# produce an event (the store does not queue them).
+_HOOK_STATES = {"queued": "new", "claimed": "sent_to_client", "done": "done"}
+
+
+def _hook_job_state(state, error):
+    if state == "failed":
+        return "expired" if error == "expired" else "error"
+    return _HOOK_STATES.get(state, state)
+
+
+def webhook_event(ev):
+    """A queued `store.due_webhook_events()` row -> one element of the JSON array POSTed to the
+    target. We have no parent/child accounts, so the org is both accountId and its controller."""
+    d = ev["data"]
+    if ev["type"] == "print job state":
+        data = {"uid": d["uid"], "state": _hook_job_state(d["state"], d.get("error")),
+                "message": d.get("error") or "", "printJobId": d["job_id"]}
+    else:
+        # Their connection object describes a client session; ours is the agent's last poll.
+        # `computerId` is ours — their payload has no computer id, which leaves a receiver with
+        # nothing to join on but the hostname.
+        conn = {"serverUuid": None, "connectionTimestamp": _iso(d.get("last_seen_at")),
+                "version": "", "edition": "printpapi", "hostname": d["name"]}
+        event = dict(conn) if d["online"] else dict(
+            conn, disconnectionTimestamp=_iso(ev["created_at"]))
+        data = {"connections": [conn] if d["online"] else [], "event": event,
+                "computerId": d["computer_id"]}
+    return {"type": ev["type"], "accountId": ev["org_id"], "controllingAccountId": ev["org_id"],
+            "createdAt": _iso(ev["created_at"]), "data": data}

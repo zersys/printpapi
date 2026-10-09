@@ -23,11 +23,11 @@ up and prints it — documents **and** label printers (Zebra/ZPL, Bixolon, therm
 - Fleet monitoring: `GET /computers` + online/offline webhooks, Prometheus `/metrics`
 - Retry-safe submits (`idempotency_key`) and job deadlines (`expire_after`)
 - **PrintNode-compatible API layer** — point an existing SDK/integration at your server
-  ([docs](docs/printnode-compat.md))
+  ([docs](docs/printapi-compat.md))
 - **Star CloudPRNT**: Star receipt/label printers poll the server themselves — no agent, nothing
   installed at the site ([docs](docs/cloudprnt.md); built to the published spec, not yet verified
   on a physical printer)
-- Source available ([Elastic License 2.0](#license): self-host freely, don't resell it as a service) · 336 tests
+- Source available ([Elastic License 2.0](#license): self-host freely, don't resell it as a service) · 372 tests
 
 ## Get started
 
@@ -94,7 +94,7 @@ shape, without the per-printer monthly fee or sending your documents through som
 It has things we don't (scales, a hosted SLA — see the [roadmap](docs/roadmap.md)). Software you
 already wrote against their API can be pointed here: send HTTP Basic auth instead of a bearer token
 and the server answers in their JSON shapes
-([PrintNode-compatible API](docs/printnode-compat.md)).
+([PrintNode-compatible API](docs/printapi-compat.md)).
 
 *PrintNode is a trademark of PrintNode Ltd. printpapi is not affiliated with, endorsed by, or
 sponsored by PrintNode.*
@@ -106,7 +106,7 @@ sponsored by PrintNode.*
 | [Server](docs/server.md) | how it works, configuration, Docker, dashboard (+ rebuilding it), API keys, security |
 | [Agent](docs/agent.md) | install, `agent.ini`, printer syntax, labels vs PDF, per-printer setup, service install |
 | [HTTP API](docs/api.md) | endpoints, auth, content types, job lifecycle |
-| [PrintNode-compatible API](docs/printnode-compat.md) | point an existing PrintNode client at printpapi |
+| [PrintNode-compatible API](docs/printapi-compat.md) | point an existing PrintNode client at printpapi |
 | [Star CloudPRNT](docs/cloudprnt.md) | Star printers polling the server directly, without an agent |
 | [Recipes](docs/recipes.md) | print from n8n, Zapier, Make, curl — in one HTTP node |
 | [E-commerce](docs/ecommerce.md) | WooCommerce plugin, Shopify webhook, `POST /orders` |

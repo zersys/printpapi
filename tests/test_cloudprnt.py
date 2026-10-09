@@ -299,7 +299,7 @@ def test_server_setting_request_is_a_404_so_the_printer_falls_back_to_http():
         httpd.shutdown()
 
 
-def test_basic_auth_is_accepted_and_does_not_collide_with_the_printnode_layer():
+def test_basic_auth_is_accepted_and_does_not_collide_with_the_printapi_layer():
     conn = _mem()
     _org_with_key(conn)
     httpd, base = _serve(conn)
@@ -309,7 +309,7 @@ def test_basic_auth_is_accepted_and_does_not_collide_with_the_printnode_layer():
         assert code == 200 and json.loads(raw) == {"jobReady": False}
         assert _cp("GET", base + f"/cloudprnt?mac={MAC}", basic="cpkey")[0] == 404
         assert _cp("DELETE", base + f"/cloudprnt?mac={MAC}&code=OK", basic="cpkey")[0] == 200
-        # ... and the PrintNode compat layer still answers its own paths under Basic auth
+        # ... and the printapi compat layer still answers its own paths under Basic auth
         code, raw, _ = _cp("GET", base + "/whoami", basic="cpkey")
         assert code == 200 and "id" in json.loads(raw)
     finally:

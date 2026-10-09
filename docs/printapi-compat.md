@@ -50,6 +50,10 @@ id is `400 unknown printer`, a foreign job id is simply absent from the list.
 | `GET /printjobs/{set}` | the same, restricted to those job ids |
 | `GET /printjobs/{set}/states` | array of state arrays, one array per job |
 | `DELETE /printjobs/{set}` | number of jobs cancelled |
+| `GET /webhooks` | array of webhook objects |
+| `POST /webhook` | the webhook list after adding one |
+| `PATCH /webhook/{id}` | the webhook list after changing one |
+| `DELETE /webhook/{id}` | the webhook list after removing one |
 
 `{set}` is the id-set notation the clients build: `10`, `10,12`, `5-9`, or a mix of those. A set is
 capped at 500 ids; a reversed or oversized range is a `400`.
@@ -88,6 +92,27 @@ Two deliberate leniencies, because the point of this layer is that an unmodified
   still `400`s.
 - **Options on a raw job are dropped whole.** ZPL/ESC-POS carries its own layout, no renderer ever
   sees it, so paper/duplex are meaningless there ([gotcha #1](../HANDOFF.md#3-hard-won-gotchas--do-not-rediscover-these)).
+
+## Webhooks
+
+`{url, secret, messages}` with `messages` either `["*"]` or a subset of `"computer state"` and
+`"print job state"`; at most five per org. The object they answer with matches theirs, except that
+only the straight `counts` are reported — the decaying `exp5m`/`exp1h`/`exp1d`/`exp7d` counters
+are left out. Deliveries are a JSON array of `{type, accountId, controllingAccountId, createdAt,
+data}` events, retried once after 5 s and then dropped, as theirs are. Payloads and delivery rules
+are in [api.md](api.md#account-webhooks).
+
+Differences to plan for:
+
+- **The secret is sent in an `X-Webhook-Secret` request header.** PrintNode documents that the
+  secret is sent with each request but not *where*; a receiver written for them may read it
+  elsewhere — point it at this header.
+- **Any `2xx` is a success.** Their receivers must also answer `X-PrintNode-Webhook-Status: OK`;
+  sending it does no harm here, leaving it out does none either.
+- A client key may manage webhooks here (it is all a PrintNode client carries). The bootstrap
+  token lists every org's webhooks but cannot create one — it belongs to no org.
+- `computer state` events carry a `computerId` field of ours; `serverUuid` is `null` and
+  `version` empty.
 
 ## Job states
 

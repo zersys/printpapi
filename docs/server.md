@@ -155,7 +155,7 @@ throttled and non-enumerating login, `http(s)`-only URL fetches, 32 MB request-b
 no `shell=True`, agent temp-file cleanup, and job payloads scoped so an agent can only touch
 its own jobs.
 
-The [PrintNode-compatible layer](printnode-compat.md) accepts HTTP **Basic** auth as well — the key
+The [PrintNode-compatible layer](printapi-compat.md) accepts HTTP **Basic** auth as well — the key
 rides in the username, so it is the same secret with the same org scope, but base64 in a header is
 not encryption: put TLS in front of it, as you should for the bearer token anyway.
 

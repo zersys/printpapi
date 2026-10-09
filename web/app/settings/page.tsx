@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
-import { CreditCard, Gauge, Loader2, Lock, Save, Webhook } from "lucide-react";
+import { CreditCard, Gauge, Loader2, Lock, Save, Trash2 } from "lucide-react";
 import { usePoll } from "@/hooks/use-poll";
 import { getMe, getOrg, listOrgs, listPlans, updateOrg } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState, FieldLabel } from "@/components/bits";
 import { OrgPicker } from "@/components/org-picker";
+import { WebhooksCard } from "@/components/webhooks-card";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -31,7 +32,6 @@ export default function SettingsPage() {
   // Empty on a server without a plan catalogue — then the whole billing card stays hidden.
   const { data: catalogue } = usePoll(useCallback(() => listPlans(), []), 0);
 
-  const [eventUrl, setEventUrl] = useState("");
   const [secret, setSecret] = useState("");
   const [quota, setQuota] = useState("");
   const [busy, setBusy] = useState("");
@@ -42,7 +42,6 @@ export default function SettingsPage() {
   // alone also means a background refresh cannot overwrite what someone is typing.
   if (org && seeded !== org.id) {
     setSeeded(org.id);
-    setEventUrl(org.event_url ?? "");
     setSecret("");
     setQuota(org.job_quota === null ? "" : String(org.job_quota));
   }
@@ -203,43 +202,33 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Webhook className="size-4" /> Agent events
-          </CardTitle>
-          <CardDescription>
-            Where this org&apos;s <code>computer_online</code> / <code>computer_offline</code>{" "}
-            events are POSTed when an agent appears or drops off. Empty turns them off. Payloads
-            are unsigned — treat the URL itself as the secret.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form
-            className="flex flex-wrap items-end gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              save("Event URL", { event_url: eventUrl.trim() || null });
-            }}
-          >
-            <div className="min-w-72 flex-1">
-              <FieldLabel htmlFor="event_url">Event URL</FieldLabel>
-              <Input
-                id="event_url"
-                type="url"
-                className="mt-1.5 font-mono"
-                placeholder="https://hooks.yourshop.example/printpapi"
-                value={eventUrl}
-                onChange={(e) => setEventUrl(e.target.value)}
-              />
-            </div>
-            <Button type="submit" disabled={busy === "Event URL"}>
-              {busy === "Event URL" ? <Loader2 className="animate-spin" /> : <Save />}
-              Save
+      {chosen !== null && <WebhooksCard key={chosen} orgId={chosen} />}
+
+      {/* The older single Event URL (computer_online / computer_offline only) keeps working for
+          orgs that set one; webhooks replace it, so it is shown only while it is still set. */}
+      {org?.event_url && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Legacy event URL</CardTitle>
+            <CardDescription>
+              Still receives <code>computer_online</code> / <code>computer_offline</code> (unsigned,
+              one event per request). Webhooks above cover the same events and print jobs — add one
+              there, then clear this.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 flex-1 truncate font-mono text-sm">{org.event_url}</code>
+            <Button
+              variant="outline"
+              disabled={busy === "Event URL"}
+              onClick={() => save("Event URL", { event_url: null })}
+            >
+              {busy === "Event URL" ? <Loader2 className="animate-spin" /> : <Trash2 />}
+              Clear
             </Button>
-          </form>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

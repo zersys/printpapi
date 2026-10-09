@@ -48,6 +48,10 @@ Token comparison is constant-time (`hmac.compare_digest`).
 | `GET /orgs/{id}` | manage | One org's settings + `plan`, `job_quota` and `jobs_this_month` |
 | `PUT /orgs/{id}` | manage | Set/clear `event_url`, `shopify_secret`; `job_quota` and `plan` are root-only |
 | `DELETE /orgs/{id}` | root | Remove an org and everything in it (never the default org) |
+| `GET /orgs/{id}/webhooks` | manage | The org's [account webhooks](#account-webhooks), with delivery counts |
+| `POST /orgs/{id}/webhooks` | manage | Add one `{url, secret, messages}` (at most 5 per org) |
+| `PATCH /orgs/{id}/webhooks/{wid}` | manage | Change any of `url`, `secret`, `messages` |
+| `DELETE /orgs/{id}/webhooks/{wid}` | manage | Remove one (already-queued events are still sent) |
 | `GET /plans` | any | The [billing](billing.md) plan catalogue + the caller's current plan |
 | `POST /billing/webhook` | HMAC | The payment provider's callback: this org is on that plan now |
 | `POST /apikeys` | manage | Issue a client key → `{id, label, org_id, key}` (key shown once) |
@@ -62,7 +66,7 @@ Token comparison is constant-time (`hmac.compare_digest`).
 Request bodies are capped at 32 MB.
 
 An `Authorization: Basic` header instead of `Bearer` switches the same server to the
-**[PrintNode-compatible shapes](printnode-compat.md)** (`/whoami`, `/printjobs`, and PrintNode's
+**[PrintNode-compatible shapes](printapi-compat.md)** (`/whoami`, `/printjobs`, and PrintNode's
 JSON for `/printers` and `/computers`), so an existing client can be pointed here unchanged. Same
 keys, same orgs; everything below describes the `Bearer` API.
 
@@ -147,6 +151,49 @@ Set `callback_url` on a job and the server POSTs this JSON once the job reaches 
   was lost, so it retries). Make your handler idempotent — dedupe on `job_id` + `state`.
 - The payload is **unsigned** and the URL is fetched server-side (`http(s)` only) — same trust model
   as the `*_uri` content types. Point it at a trusted endpoint.
+
+## Account webhooks
+
+Per-org subscriptions to everything that happens, modelled on PrintNode's: every print job state
+change and every computer going online or offline, POSTed to up to five URLs per org. Manage them
+on the dashboard's **Settings** page, with the endpoints above, or with the
+[PrintNode-compatible](printapi-compat.md#webhooks) `/webhooks` endpoints.
+
+```bash
+curl -s -X POST localhost:3460/orgs/2/webhooks -H 'Authorization: Bearer <session or root>' \
+     -d '{"url":"https://app.example/printpapi","secret":"s3cret","messages":["*"]}'
+```
+
+- `messages`: `["*"]` (everything) or any of `"print job state"`, `"computer state"`.
+- **Each request is a JSON array** of every event due for that target, in PrintNode's format:
+
+  ```json
+  [{"type": "print job state", "accountId": 2, "controllingAccountId": 2,
+    "createdAt": "2026-10-09T10:15:02.120Z",
+    "data": {"uid": "5f0c…", "state": "done", "message": "", "printJobId": 41}},
+   {"type": "computer state", "accountId": 2, "controllingAccountId": 2,
+    "createdAt": "2026-10-09T10:16:40.003Z",
+    "data": {"connections": [], "computerId": 3,
+             "event": {"serverUuid": null, "connectionTimestamp": "2026-10-09T10:15:38.900Z",
+                       "version": "", "edition": "printpapi", "hostname": "office-pc",
+                       "disconnectionTimestamp": "2026-10-09T10:16:40.003Z"}}}]
+  ```
+
+  Print job states are PrintNode's stable ones: `new`, `sent_to_client`, `done`, `error`,
+  `expired`. A cancelled job and a reaper requeue send nothing. `computerId` is our addition —
+  their payload has no computer id.
+- **The secret arrives in the `X-Webhook-Secret` header**, as-is. Compare it with
+  `hash_equals` / `hmac.compare_digest` before trusting the body. Use `https://` targets: the
+  secret travels with every request.
+- **Delivery:** any `2xx` counts. A failure re-queues the request's events once, 5 s later; a
+  second failure drops them (counted as `dropped_events`). `uid` identifies an event across that
+  retry — dedupe on it. The dispatcher runs every 5 s, so expect events within seconds, not
+  instantly.
+- Editing or deleting a webhook does not touch events already queued for it — they still go to
+  the old URL with the old secret.
+
+The older per-org `event_url` (below) and per-job `callback_url` keep working; account webhooks are
+the superset.
 
 ## Computers (agents)
 

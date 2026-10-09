@@ -50,14 +50,14 @@ extracted, generalized OSS project.
     order id. The WooCommerce side is a real WP plugin in `integrations/woocommerce` that calls
     `POST /orders` with a client key.
   - `GET /metrics` — Prometheus text. `GET /health`.
-- **PrintNode-compatible layer** (`app/printnode.py`, roadmap #7) — the *same* endpoints answer in
+- **PrintNode-compatible layer** (`app/printapi.py`, roadmap #7) — the *same* endpoints answer in
   PrintNode's JSON shapes when the request authenticates with **HTTP Basic** instead of `Bearer`
   (their clients carry the API key as the Basic username, so nothing needs enabling). Surface:
   `GET /whoami`, `/computers`, `/printers`, `POST|GET|DELETE /printjobs`,
   `/printjobs/{set}/states`, plus their id-set paths (`/printers/5-9`). Pure translation — same
   keys, same orgs, same `POST /jobs` validation path (`_submit_job`), no schema or agent change.
   Their unknown option keys are dropped rather than rejected (a client sends its whole option set);
-  options on raw jobs are dropped whole. See `docs/printnode-compat.md` for the mapping tables and
+  options on raw jobs are dropped whole. See `docs/printapi-compat.md` for the mapping tables and
   the trademark disclaimer that has to stay.
 - **Star CloudPRNT** (`app/cloudprnt.py`, roadmap #9) — Star's printers poll an HTTP URL by
   themselves, so at a site with one there is **no agent to install**. `POST|GET|DELETE
@@ -153,7 +153,7 @@ extracted, generalized OSS project.
   (semicolon-separated — Windows printer names, or CUPS queue names on Linux).
 - Shipped in the homelab as a signed-Python install (see gotcha #2), autostart via Task Scheduler.
 
-**Tests:** 336, all green (`python -m pytest`). Real loopback HTTP servers (ThreadingHTTPServer),
+**Tests:** 372, all green (`python -m pytest`). Real loopback HTTP servers (ThreadingHTTPServer),
 real SQLite (:memory:), injected render fns / subprocess runners — no mocks, no real printers.
 
 **Model:** **poll** — agent opens a long-poll `GET /agent/jobs` to the server, receives jobs, prints,
@@ -209,7 +209,7 @@ webhooks, per-job print options, printer capability discovery, **multi-tenancy**
 n8n/Zapier/Make, per-printer-family setup, QZ Tray/PrintNode comparison in the README), and
 **e-commerce auto-print** (roadmap #5: `POST /orders`, packing-slip renderer, WooCommerce plugin,
 Shopify webhook — `docs/ecommerce.md`), and the **PrintNode API compatibility layer** (roadmap #7:
-`app/printnode.py`, Basic-auth-selected — `docs/printnode-compat.md`), and the **file backend**
+`app/printapi.py`, Basic-auth-selected — `docs/printapi-compat.md`), and the **file backend**
 (roadmap #8: a `file:///dir` printer target in the agent — `docs/agent.md#file-output-virtual-print-server`),
 and **org accounts** on top of multi-tenancy (e-mail/password login, session tokens, org-scoped
 key and user self-management — `app/auth.py`, `docs/api.md#accounts-and-login`), and the
@@ -222,7 +222,7 @@ org settings in the dashboard, monthly job quotas — `app/mail.py`, `docs/api.m
 (v2.5.1) can also sit behind an auth proxy (extra headers from `agent.ini`'s `[headers]` section),
 has a socket timeout so a silently-dropped NAT flow can't hang it forever, and registers with
 backoff until it succeeds instead of exiting once at boot — see `docs/agent.md#unattended-machines`.
-336 tests green.
+372 tests green.
 A demand-research sweep (July 2026) produced the ranked v2 roadmap in `docs/roadmap.md` — read it
 before inventing features. Roadmap #1–#9 are done, and so is billing. What is left on the ranked
 list: #10 scales (agent-side USB HID), #11 ESC/POS templating. Non-code leftovers: code-sign the
@@ -236,7 +236,7 @@ child accounts are not portable at all. Clients that hardcode their hostname sti
 proxy/DNS override — only ones with a configurable base URL work by themselves. The legal footing:
 reimplementing an API is lawful (EU 2009/24/EC Art. 1(2), CJEU C-406/10; US *Google v. Oracle*),
 provided no documentation text or SDK code is copied and the trademark is used only descriptively —
-which is why the disclaimer sits in the README, the compat doc and `app/printnode.py`'s docstring.
+which is why the disclaimer sits in the README, the compat doc and `app/printapi.py`'s docstring.
 
 On the e-commerce work specifically, the deliberate ceilings are: the packing slip is plain
 (Helvetica, no logo, no template — `# ponytail:` note at the top of `app/packing_slip.py`),

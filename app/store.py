@@ -7,6 +7,9 @@ import secrets
 import sqlite3
 import threading
 import time
+import uuid
+
+from app import webhooks
 
 DEFAULT_ORG = 1
 DEFAULT_USER = 1
@@ -52,6 +55,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem ON jobs(org_id, idempotency_key);
 CREATE TABLE IF NOT EXISTS api_keys(
   id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, label TEXT NOT NULL,
   key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL);
+-- Account webhooks (printapi-compatible). The secret is stored in plaintext: it is sent to the target
+-- as-is on every request, so there is nothing to compare a hash against.
+CREATE TABLE IF NOT EXISTS webhooks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, url TEXT NOT NULL,
+  secret TEXT NOT NULL, messages TEXT NOT NULL,
+  received_events INTEGER NOT NULL DEFAULT 0, dropped_events INTEGER NOT NULL DEFAULT 0,
+  successful_requests INTEGER NOT NULL DEFAULT 0, failed_requests INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS webhooks_org ON webhooks(org_id);
+-- The delivery queue. Each event carries its own url + secret: editing or deleting the webhook
+-- afterwards does not redirect or drop what is already queued (the compatible API's rule too).
+CREATE TABLE IF NOT EXISTS webhook_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, webhook_id INTEGER NOT NULL, org_id INTEGER NOT NULL,
+  url TEXT NOT NULL, secret TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0, due_at REAL NOT NULL, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS webhook_events_due ON webhook_events(due_at);
 """
 
 
@@ -200,7 +219,8 @@ def delete_org(conn, org_id):
             users = "SELECT id FROM users WHERE org_id=?"
             conn.execute(f"DELETE FROM sessions WHERE user_id IN ({users})", (org_id,))
             conn.execute(f"DELETE FROM password_resets WHERE user_id IN ({users})", (org_id,))
-            for table in ("jobs", "printers", "agents", "api_keys", "users"):
+            for table in ("jobs", "printers", "agents", "api_keys", "users", "webhooks",
+                          "webhook_events"):
                 conn.execute(f"DELETE FROM {table} WHERE org_id=?", (org_id,))
             conn.execute("DELETE FROM orgs WHERE id=?", (org_id,))
             conn.commit()
@@ -631,7 +651,7 @@ def enqueue_job(conn, printer_id, type_, mode, payload, user_id=DEFAULT_USER, ti
             quota = quota["job_quota"] if quota else None
             if quota is not None and _usage(conn, p["org_id"], month_start(now)) >= quota:
                 # Checked here rather than in the handlers so every caller — POST /jobs, /orders,
-                # the Shopify webhook and the PrintNode compat layer — is capped by one guard.
+                # the Shopify webhook and the printapi compat layer — is capped by one guard.
                 raise QuotaExceeded(f"monthly job quota reached ({quota})")
             cur = conn.execute(
                 "INSERT INTO jobs(org_id, user_id, printer_id, agent_id, type, mode, state, "
@@ -641,6 +661,7 @@ def enqueue_job(conn, printer_id, type_, mode, payload, user_id=DEFAULT_USER, ti
                  sqlite3.Binary(payload), title, copies,
                  json.dumps(options) if options else None, callback_url, idempotency_key,
                  None if expire_after is None else now + expire_after, now))
+            _emit_job(conn, p["org_id"], cur.lastrowid, "queued", None, now)
             conn.commit()
             return cur.lastrowid
         except Exception:
@@ -657,13 +678,14 @@ def claim_job(conn, agent_id, now=None):
             # Past its deadline the job is skipped here and failed by the reaper's expire_jobs —
             # the skip is what guarantees it never prints, whatever the reaper's tick is doing.
             row = conn.execute(
-                "SELECT id, printer_id, mode, copies, options FROM jobs "
+                "SELECT id, org_id, printer_id, mode, copies, options FROM jobs "
                 "WHERE agent_id=? AND state='queued' AND (expires_at IS NULL OR expires_at > ?) "
                 "ORDER BY created_at, id LIMIT 1", (agent_id, now)).fetchone()
             if row is None:
                 conn.commit()
                 return None
             conn.execute("UPDATE jobs SET state='claimed', claimed_at=? WHERE id=?", (now, row["id"]))
+            _emit_job(conn, row["org_id"], row["id"], "claimed", None, now)
             conn.commit()
             return {"job_id": row["id"], "printer_id": row["printer_id"], "mode": row["mode"],
                     "copies": row["copies"],
@@ -702,6 +724,9 @@ def finish_job(conn, job_id, agent_id, ok, error=None):
                 "UPDATE jobs SET state=?, error=?, finished_at=? "
                 "WHERE id=? AND agent_id=? AND state='claimed'",
                 (state, None if ok else error, now, job_id, agent_id))
+            if cur.rowcount == 1:
+                org = conn.execute("SELECT org_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+                _emit_job(conn, org["org_id"], job_id, state, None if ok else error, now)
             conn.commit()
             return cur.rowcount == 1
         except Exception:
@@ -714,10 +739,15 @@ def requeue_stale(conn, timeout_s, max_retries, now=None):
     cutoff = now - timeout_s
     with _LOCK:
         try:
+            spent = conn.execute("SELECT id, org_id FROM jobs "
+                                 "WHERE state='claimed' AND claimed_at < ? AND retries >= ?",
+                                 (cutoff, max_retries)).fetchall()
             conn.execute(
                 "UPDATE jobs SET state='failed', error='retry limit exceeded', finished_at=? "
                 "WHERE state='claimed' AND claimed_at < ? AND retries >= ?",
                 (now, cutoff, max_retries))
+            for r in spent:
+                _emit_job(conn, r["org_id"], r["id"], "failed", "retry limit exceeded", now)
             cur = conn.execute(
                 "UPDATE jobs SET state='queued', retries=retries+1, claimed_at=NULL "
                 "WHERE state='claimed' AND claimed_at < ? AND retries < ?",
@@ -737,10 +767,14 @@ def expire_jobs(conn, now=None):
     now = time.time() if now is None else now
     with _LOCK:
         try:
+            gone = conn.execute("SELECT id, org_id FROM jobs WHERE state='queued' "
+                                "AND expires_at IS NOT NULL AND expires_at <= ?", (now,)).fetchall()
             cur = conn.execute(
                 "UPDATE jobs SET state='failed', error='expired', finished_at=:now "
                 "WHERE state='queued' AND expires_at IS NOT NULL AND expires_at <= :now",
                 {"now": now})
+            for r in gone:
+                _emit_job(conn, r["org_id"], r["id"], "failed", "expired", now)
             conn.commit()
             return cur.rowcount
         except Exception:
@@ -821,7 +855,7 @@ def get_job(conn, job_id, org_id=None):
 
 
 def recent_jobs(conn, limit=50, org_id=None, ids=None):
-    """The job history, newest first. `ids` restricts it to specific job ids (the PrintNode compat
+    """The job history, newest first. `ids` restricts it to specific job ids (the printapi compat
     layer addresses jobs by id set) — still org-filtered, so a foreign id is simply absent."""
     params = {"limit": limit, "org": org_id}
     where = ""
@@ -859,7 +893,7 @@ def metrics(conn, online_window_s, now=None, org_id=None):
 
 
 def list_agents(conn, online_window_s, now=None, org_id=None):
-    """Agents (PrintNode calls them computers) with liveness and how many printers each carries."""
+    """Agents (the compatible API calls them computers) with liveness and how many printers each carries."""
     now = time.time() if now is None else now
     with _LOCK:
         rows = conn.execute(
@@ -893,6 +927,9 @@ def claim_agent_transitions(conn, online_window_s, now=None):
                     continue                      # same state as last pass — no edge
                 conn.execute("UPDATE agents SET offline_notified=? WHERE id=?",
                              (1 if offline else 0, r["id"]))
+                _emit(conn, r["org_id"], webhooks.COMPUTER_STATE,
+                      {"computer_id": r["id"], "name": r["name"], "online": not offline,
+                       "last_seen_at": r["last_seen_at"]}, now)
                 if r["event_url"]:
                     out.append({"agent_id": r["id"], "name": r["name"], "org_id": r["org_id"],
                                 "last_seen_at": r["last_seen_at"], "event_url": r["event_url"],
@@ -923,3 +960,151 @@ def list_printers(conn, online_window_s, now=None, org_id=None):
             "online": seen is not None and (now - seen) <= online_window_s,
         })
     return out
+
+
+# --- account webhooks ---------------------------------------------------------------------------
+
+class WebhookLimit(Exception):
+    pass
+
+
+_HOOK_COLS = ("id, org_id, url, secret, messages, received_events, dropped_events, "
+              "successful_requests, failed_requests, created_at")
+_RETRY_AFTER_S = 5        # a failed request's events are due again this much later, once
+
+
+def _hook_row(r):
+    return dict(r, messages=json.loads(r["messages"]))
+
+
+def create_webhook(conn, org_id, url, secret, messages):
+    now = time.time()
+    with _LOCK:
+        try:
+            n = conn.execute("SELECT COUNT(*) c FROM webhooks WHERE org_id=?",
+                             (org_id,)).fetchone()["c"]
+            if n >= webhooks.MAX_PER_ORG:
+                raise WebhookLimit(f"an org may have at most {webhooks.MAX_PER_ORG} webhooks")
+            cur = conn.execute("INSERT INTO webhooks(org_id, url, secret, messages, created_at) "
+                               "VALUES(?,?,?,?,?)", (org_id, url, secret, json.dumps(messages), now))
+            conn.commit()
+            return cur.lastrowid
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def list_webhooks(conn, org_id=None):
+    with _LOCK:
+        rows = conn.execute(f"SELECT {_HOOK_COLS} FROM webhooks "
+                            "WHERE (:org IS NULL OR org_id = :org) ORDER BY id",
+                            {"org": org_id}).fetchall()
+    return [_hook_row(r) for r in rows]
+
+
+def get_webhook(conn, webhook_id, org_id=None):
+    """One webhook, org-filtered — another org's reads as missing."""
+    with _LOCK:
+        r = conn.execute(f"SELECT {_HOOK_COLS} FROM webhooks "
+                         "WHERE id=:id AND (:org IS NULL OR org_id = :org)",
+                         {"id": webhook_id, "org": org_id}).fetchone()
+    return _hook_row(r) if r else None
+
+
+def update_webhook(conn, webhook_id, fields, org_id=None):
+    """Apply validated fields (any of url, secret, messages). False if no such webhook here."""
+    cols = {k: json.dumps(v) if k == "messages" else v for k, v in fields.items()
+            if k in ("url", "secret", "messages")}
+    if not cols:
+        return get_webhook(conn, webhook_id, org_id) is not None
+    sets = ", ".join(f"{k} = :{k}" for k in cols)      # keys are the fixed names above
+    with _LOCK:
+        try:
+            cur = conn.execute(f"UPDATE webhooks SET {sets} "
+                               "WHERE id=:id AND (:org IS NULL OR org_id = :org)",
+                               dict(cols, id=webhook_id, org=org_id))
+            conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def delete_webhook(conn, webhook_id, org_id=None):
+    """Remove a webhook. Its already-queued events are still delivered (they carry their own
+    target), as the compatible API does it."""
+    with _LOCK:
+        try:
+            cur = conn.execute("DELETE FROM webhooks WHERE id=:id AND (:org IS NULL OR org_id = :org)",
+                               {"id": webhook_id, "org": org_id})
+            conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _emit(conn, org_id, type_, data, now):
+    """Queue one event for every webhook of `org_id` that wants `type_`. Runs inside the caller's
+    lock and transaction, so an event exists exactly when the state change it reports does."""
+    hooks = conn.execute("SELECT id, url, secret, messages FROM webhooks WHERE org_id=?",
+                         (org_id,)).fetchall()
+    hooks = [h for h in hooks if webhooks.wants(json.loads(h["messages"]), type_)]
+    if not hooks:
+        return
+    body = json.dumps(dict(data, uid=str(uuid.uuid4())))   # one uid per event, kept on retry
+    for h in hooks:
+        conn.execute("INSERT INTO webhook_events(webhook_id, org_id, url, secret, type, data, "
+                     "due_at, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                     (h["id"], org_id, h["url"], h["secret"], type_, body, now, now))
+        conn.execute("UPDATE webhooks SET received_events = received_events + 1 WHERE id=?",
+                     (h["id"],))
+
+
+def _emit_job(conn, org_id, job_id, state, error, now):
+    """A print job reached one of the states a webhook reports: queued (their `new`), claimed
+    (`sent_to_client`), done, failed (`error` / `expired`). Cancel and requeue are not reported —
+    the compatible API only ever publishes its stable states."""
+    _emit(conn, org_id, webhooks.PRINT_JOB_STATE,
+          {"job_id": job_id, "state": state, "error": error}, now)
+
+
+def due_webhook_events(conn, now=None, limit=100):
+    """Queued events due by `now`, oldest first. The dispatcher groups them by target."""
+    # ponytail: one bounded batch per pass; a backlog drains over several passes.
+    now = time.time() if now is None else now
+    with _LOCK:
+        rows = conn.execute("SELECT id, webhook_id, org_id, url, secret, type, data, attempts, "
+                            "created_at FROM webhook_events WHERE due_at <= ? ORDER BY id LIMIT ?",
+                            (now, limit)).fetchall()
+    return [dict(r, data=json.loads(r["data"])) for r in rows]
+
+
+def webhook_request_done(conn, event_ids, ok, now=None):
+    """Record one delivery request carrying `event_ids`. Success clears them. A failure re-queues
+    each event once, due `_RETRY_AFTER_S` later; an event that already had its retry is dropped.
+    The counters land on whichever webhooks the events came from (gone ones are skipped)."""
+    now = time.time() if now is None else now
+    if not event_ids:
+        return
+    marks = ",".join("?" * len(event_ids))
+    with _LOCK:
+        try:
+            rows = conn.execute(f"SELECT id, webhook_id, attempts FROM webhook_events "
+                                f"WHERE id IN ({marks})", list(event_ids)).fetchall()
+            for hid in {r["webhook_id"] for r in rows}:
+                col = "successful_requests" if ok else "failed_requests"
+                conn.execute(f"UPDATE webhooks SET {col} = {col} + 1 WHERE id=?", (hid,))
+            for r in rows:
+                if ok or r["attempts"] >= 1:
+                    conn.execute("DELETE FROM webhook_events WHERE id=?", (r["id"],))
+                    if not ok:
+                        conn.execute("UPDATE webhooks SET dropped_events = dropped_events + 1 "
+                                     "WHERE id=?", (r["webhook_id"],))
+                else:
+                    conn.execute("UPDATE webhook_events SET attempts = 1, due_at = ? WHERE id=?",
+                                 (now + _RETRY_AFTER_S, r["id"]))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise

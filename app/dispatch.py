@@ -26,11 +26,11 @@ def _http_get(url, timeout=30):
         return r.read()
 
 
-def _http_post(url, json_body, timeout=30):
+def _http_post(url, json_body, timeout=30, headers=None):
     data = json.dumps(json_body).encode()
     req = urllib.request.Request(
         url, data=data, method="POST",
-        headers={"User-Agent": _USER_AGENT, "Content-Type": "application/json"})
+        headers={**(headers or {}), "User-Agent": _USER_AGENT, "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 

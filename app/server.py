@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from app import auth, billing, cloudprnt, envfile, mail, printnode, store
+from app import auth, billing, cloudprnt, envfile, mail, printapi, store, webhooks
 from app.dispatch import (decode_payload, agent_mode, parse_copies, parse_callback_url,
                           parse_options, parse_expire_after, parse_idempotency_key,
                           DispatchError, FetchError, _http_get, _http_post)
@@ -29,19 +29,21 @@ _AGENT_RESULT = re.compile(r"^/agent/jobs/(\d+)/result$")
 _APIKEY_ID = re.compile(r"^/apikeys/(\d+)$")
 _ORG_ID = re.compile(r"^/orgs/(\d+)$")
 _ORG_USERS = re.compile(r"^/orgs/(\d+)/users$")
+_ORG_WEBHOOKS = re.compile(r"^/orgs/(\d+)/webhooks(?:/(\d+))?$")
+_PA_WEBHOOK = re.compile(r"^/webhook/(\d+)$")
 _USER_ID = re.compile(r"^/users/(\d+)$")
 
 # Compared against when no user matches the e-mail, so a wrong address and a wrong password cost
 # the same ~50 ms — the login answer alone must not reveal which accounts exist.
 _DUMMY_HASH = auth.hash_password("no such user, no such password")
-# PrintNode-compat paths: a collection addressed by id set ("5", "5,7", "5-9"), optionally with a
-# sub-resource. Only reachable with HTTP Basic auth — see _printnode_get.
-_PN_SET = re.compile(r"^/(computers|printers|printjobs)/([\d,\- ]+)(/printers|/states)?$")
+# printapi (compat) paths: a collection addressed by id set ("5", "5,7", "5-9"), optionally with a
+# sub-resource. Only reachable with HTTP Basic auth — see _printapi_get.
+_PA_SET = re.compile(r"^/(computers|printers|printjobs)/([\d,\- ]+)(/printers|/states)?$")
 # Star CloudPRNT: one URL answers all three of its methods. The client key rides in the path
 # because the printer appends its own query string to whatever URL it was configured with; a
 # printer that can fill in its "User Name" setting instead sends the key as HTTP Basic.
 _CLOUDPRNT = re.compile(r"^/cloudprnt(?:/([A-Za-z0-9_-]+))?$")
-_PN_COLLECTIONS = ("/whoami", "/computers", "/printers", "/printjobs")
+_PA_COLLECTIONS = ("/whoami", "/computers", "/printers", "/printjobs")
 
 # The dashboard is a static, secret-free Next.js export in app/web (source in web/, built with
 # `npm run build:app`). It prompts for the API token, keeps it in localStorage, and calls the JSON
@@ -319,7 +321,7 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
         def _submit_job(self, body, org, user_id=None):
             """The POST /jobs core: validate, fetch the payload, enqueue. Returns the job id and
             raises DispatchError / FetchError / store.UnknownPrinter for the caller to map — the
-            PrintNode compat layer submits through here too, so there is one validation path."""
+            printapi compat layer submits through here too, so there is one validation path."""
             mode = agent_mode(body.get("type"))
             # Validate before decode_payload: a bad field must 400 without first fetching a URL
             # (and a retried submit must not re-fetch it either).
@@ -425,33 +427,33 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
             return self._json(200, {"ok": True, "org_id": org_id, "plan": plan["id"],
                                     "job_quota": plan["jobs"]})
 
-        # --- PrintNode-compatible layer -------------------------------------------------------
-        # Selected by auth scheme, not by URL: PrintNode carries the API key as the HTTP Basic
+        # --- printapi: the compatible layer --------------------------------------------------
+        # Selected by auth scheme, not by URL: compatible clients carry the API key as the HTTP Basic
         # username, so a Basic header means "answer in their shapes" while Bearer keeps ours. The
-        # shapes themselves live in app/printnode.py; these methods are only routing + auth.
+        # shapes themselves live in app/printapi.py; these methods are only routing + auth.
         def _is_basic(self):
             return self.headers.get("Authorization", "").startswith("Basic ")
 
-        def _pn_error(self, code, name, message):
+        def _pa_error(self, code, name, message):
             return self._json(code, {"code": name, "message": message})
 
-        def _pn_org(self):
+        def _pa_org(self):
             """Same credentials as the Bearer API — any issued client key, or the root token."""
-            key = printnode.basic_key(self.headers.get("Authorization", ""))
+            key = printapi.basic_key(self.headers.get("Authorization", ""))
             if key and hmac.compare_digest(key, token):
                 return True, None
             row = store.authenticate_client(conn, key)
             return (True, row["org_id"]) if row else (False, None)
 
-        def _pn_printers(self, org, ids=None, agent_ids=None):
-            comps = {c["id"]: printnode.computer(c)
+        def _pa_printers(self, org, ids=None, agent_ids=None):
+            comps = {c["id"]: printapi.computer(c)
                      for c in store.list_agents(conn, online_window_s, org_id=org)}
-            return [printnode.printer(p, comps.get(p["agent_id"]))
+            return [printapi.printer(p, comps.get(p["agent_id"]))
                     for p in store.list_printers(conn, online_window_s, org_id=org)
                     if (ids is None or p["id"] in ids)
                     and (agent_ids is None or p["agent_id"] in agent_ids)]
 
-        def _pn_jobs(self, org, ids):
+        def _pa_jobs(self, org, ids):
             if ids:
                 return store.recent_jobs(conn, limit=len(ids), org_id=org, ids=ids)
             # `?limit=` is how their clients page the job list; silently capping every caller at our
@@ -463,87 +465,165 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
                 limit = 50
             return store.recent_jobs(conn, limit=limit, org_id=org)
 
-        def _printnode_get(self):
-            """PrintNode-shaped GETs. False if the path is not part of the compat surface."""
+        def _printapi_get(self):
+            """Compatible-shape GETs. False if the path is not part of the compat surface."""
             path = self.path.split("?", 1)[0]
-            m = _PN_SET.match(path)
-            if path not in _PN_COLLECTIONS and not m:
+            m = _PA_SET.match(path)
+            if path not in _PA_COLLECTIONS and not m:
                 return False
             kind = m.group(1) if m else path.lstrip("/")
             sub = (m.group(3) or "") if m else ""
             if ((sub == "/printers" and kind != "computers")
                     or (sub == "/states" and kind != "printjobs")):
                 return False                    # e.g. /printers/1/states — not a route of theirs
-            ok, org = self._pn_org()
+            ok, org = self._pa_org()
             if not ok:
-                self._pn_error(401, "Unauthorized", "invalid API key")
+                self._pa_error(401, "Unauthorized", "invalid API key")
                 return True
             try:
-                ids = printnode.parse_set(m.group(2)) if m else None
-            except printnode.CompatError as e:
-                self._pn_error(400, "BadRequest", str(e))
+                ids = printapi.parse_set(m.group(2)) if m else None
+            except printapi.CompatError as e:
+                self._pa_error(400, "BadRequest", str(e))
                 return True
             if path == "/whoami":
                 agents = store.list_agents(conn, online_window_s, org_id=org)
-                self._json(200, printnode.whoami(
+                self._json(200, printapi.whoami(
                     org, store.metrics(conn, online_window_s, org_id=org),
                     [a["name"] for a in agents if a["online"]]))
             elif kind == "computers" and sub != "/printers":
-                self._json(200, [printnode.computer(a)
+                self._json(200, [printapi.computer(a)
                                  for a in store.list_agents(conn, online_window_s, org_id=org)
                                  if ids is None or a["id"] in ids])
             elif kind == "printers" or sub == "/printers":
-                self._json(200, self._pn_printers(
+                self._json(200, self._pa_printers(
                     org, ids=ids if kind == "printers" else None,
                     agent_ids=ids if kind == "computers" else None))
             elif sub == "/states":
-                self._json(200, [printnode.printjob_states(j) for j in self._pn_jobs(org, ids)])
+                self._json(200, [printapi.printjob_states(j) for j in self._pa_jobs(org, ids)])
             else:
-                pmap = {p["id"]: p for p in self._pn_printers(org)}
-                self._json(200, [printnode.printjob(j, pmap.get(j["printer_id"]))
-                                 for j in self._pn_jobs(org, ids)])
+                pmap = {p["id"]: p for p in self._pa_printers(org)}
+                self._json(200, [printapi.printjob(j, pmap.get(j["printer_id"]))
+                                 for j in self._pa_jobs(org, ids)])
             return True
 
-        def _printnode_post(self):
+        def _printapi_post(self):
             if self.path.split("?", 1)[0] != "/printjobs":
                 return False
-            ok, org = self._pn_org()
+            ok, org = self._pa_org()
             if not ok:
-                self._pn_error(401, "Unauthorized", "invalid API key")
+                self._pa_error(401, "Unauthorized", "invalid API key")
                 return True
             try:
                 body = self._read_json()
             except ValueError:
-                self._pn_error(400, "BadRequest", "malformed json body")
+                self._pa_error(400, "BadRequest", "malformed json body")
                 return True
             try:
-                jid = self._submit_job(printnode.job_body(body), org)
+                jid = self._submit_job(printapi.job_body(body), org)
             except FetchError as e:
-                self._pn_error(502, "DownstreamError", str(e))
+                self._pa_error(502, "DownstreamError", str(e))
             except store.QuotaExceeded as e:
-                self._pn_error(402, "QuotaExceeded", str(e))
-            except (printnode.CompatError, DispatchError, store.UnknownPrinter) as e:
-                self._pn_error(400, "BadRequest", str(e))
+                self._pa_error(402, "QuotaExceeded", str(e))
+            except (printapi.CompatError, DispatchError, store.UnknownPrinter) as e:
+                self._pa_error(400, "BadRequest", str(e))
             else:
                 self._json(201, jid)      # they answer a create with the bare print job id
             return True
 
-        def _printnode_delete(self):
+        def _printapi_delete(self):
             """Their DELETE /printjobs/{set} drops queued jobs; ours cancels them (a printed job
             stays in the history) and answers with the number affected, as they do."""
-            m = _PN_SET.match(self.path.split("?", 1)[0])
+            m = _PA_SET.match(self.path.split("?", 1)[0])
             if not m or m.group(1) != "printjobs" or m.group(3):
                 return False
-            ok, org = self._pn_org()
+            ok, org = self._pa_org()
             if not ok:
-                self._pn_error(401, "Unauthorized", "invalid API key")
+                self._pa_error(401, "Unauthorized", "invalid API key")
                 return True
             try:
-                ids = printnode.parse_set(m.group(2))
-            except printnode.CompatError as e:
-                self._pn_error(400, "BadRequest", str(e))
+                ids = printapi.parse_set(m.group(2))
+            except printapi.CompatError as e:
+                self._pa_error(400, "BadRequest", str(e))
                 return True
             self._json(200, sum(store.cancel_job(conn, i, org_id=org) == "cancelled" for i in ids))
+            return True
+
+        # --- account webhooks ------------------------------------------------------------------
+        # Two front doors onto one store: printpapi's own (Bearer, /orgs/{id}/webhooks, managed
+        # like the org's other settings) and printapi's (Basic, /webhooks + /webhook/{id}, any
+        # client key — that is the only credential code written for them carries).
+        # ponytail: so a leaked client key can point the org's job/computer events at itself.
+        # Those carry ids, states and computer names, never payloads; gate this behind a
+        # manage-capable key if that ever matters.
+        def _org_webhooks(self, method):
+            m = _ORG_WEBHOOKS.match(self.path.split("?", 1)[0])
+            if not m:
+                return False
+            p = self._manager()
+            if p is None:
+                return True
+            oid = int(m.group(1))
+            if self._foreign_org(p, oid) or not store.org_exists(conn, oid):
+                self._json(404, {"error": "not found"})
+                return True
+            try:
+                if m.group(2) is None and method == "GET":
+                    self._json(200, {"webhooks": store.list_webhooks(conn, org_id=oid)})
+                elif m.group(2) is None and method == "POST":
+                    w = webhooks.validate(self._read_json())
+                    wid = store.create_webhook(conn, oid, w["url"], w["secret"], w["messages"])
+                    self._json(200, store.get_webhook(conn, wid))
+                elif m.group(2) is not None and method == "PATCH":
+                    wid = int(m.group(2))
+                    if not store.update_webhook(conn, wid, webhooks.validate(
+                            self._read_json(), partial=True), org_id=oid):
+                        self._json(404, {"error": "not found"})
+                    else:
+                        self._json(200, store.get_webhook(conn, wid))
+                elif m.group(2) is not None and method == "DELETE":
+                    if store.delete_webhook(conn, int(m.group(2)), org_id=oid):
+                        self._json(200, {"ok": True})
+                    else:
+                        self._json(404, {"error": "not found"})
+                else:
+                    self._json(405, {"error": "method not allowed"})
+            except (ValueError, store.WebhookLimit) as e:     # bad json is a ValueError too
+                self._json(400, {"error": str(e)})
+            return True
+
+        def _printapi_webhooks(self, method):
+            """printapi's GET /webhooks, POST /webhook, PATCH|DELETE /webhook/{id}. Every write
+            answers with the whole list after the change, as theirs does."""
+            path = self.path.split("?", 1)[0]
+            m = _PA_WEBHOOK.match(path)
+            if not ((path == "/webhooks" and method == "GET")
+                    or (path == "/webhook" and method == "POST")
+                    or (m and method in ("PATCH", "DELETE"))):
+                return False
+            ok, org = self._pa_org()
+            if not ok:
+                self._pa_error(401, "Unauthorized", "invalid API key")
+                return True
+            try:
+                if method == "POST":
+                    if org is None:
+                        raise ValueError("the root token belongs to no org - create webhooks with "
+                                         "an org's API key")
+                    w = webhooks.validate(self._read_json())
+                    store.create_webhook(conn, org, w["url"], w["secret"], w["messages"])
+                elif method == "PATCH":
+                    if not store.update_webhook(conn, int(m.group(1)), webhooks.validate(
+                            self._read_json(), partial=True), org_id=org):
+                        self._pa_error(404, "NotFound", "no such webhook")
+                        return True
+                elif method == "DELETE":
+                    if not store.delete_webhook(conn, int(m.group(1)), org_id=org):
+                        self._pa_error(404, "NotFound", "no such webhook")
+                        return True
+            except (ValueError, store.WebhookLimit) as e:
+                self._pa_error(400, "BadRequest", str(e))
+                return True
+            self._json(200, [printapi.webhook(w) for w in store.list_webhooks(conn, org_id=org)])
             return True
 
         # --- Star CloudPRNT ------------------------------------------------------------------
@@ -554,7 +634,7 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
         def _cloudprnt_device(self, path_key, mac):
             """Resolve a request to its enrolled device, answering 401/400 itself and returning
             None when it cannot. Every request re-touches the device, which is its liveness."""
-            key = path_key or printnode.basic_key(self.headers.get("Authorization", ""))
+            key = path_key or printapi.basic_key(self.headers.get("Authorization", ""))
             row = store.authenticate_client(conn, key)
             if row is None:
                 # An issued client key only: the root token belongs to no org, so it has no place
@@ -679,7 +759,9 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
             self._empty(404)
 
         def do_GET(self):
-            if self._is_basic() and self._printnode_get():
+            if self._is_basic() and (self._printapi_webhooks("GET") or self._printapi_get()):
+                return
+            if self._org_webhooks("GET"):
                 return
             mc = _CLOUDPRNT.match(self.path.split("?", 1)[0])
             if mc:
@@ -810,7 +892,9 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
-            if self._is_basic() and self._printnode_post():
+            if self._is_basic() and (self._printapi_webhooks("POST") or self._printapi_post()):
+                return
+            if self._org_webhooks("POST"):
                 return
             mc = _CLOUDPRNT.match(self.path.split("?", 1)[0])
             if mc:
@@ -1034,8 +1118,17 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
                 return self._json(200, {"ok": True, **applied})
             self._json(404, {"error": "not found"})
 
+        def do_PATCH(self):
+            if self._is_basic() and self._printapi_webhooks("PATCH"):
+                return
+            if self._org_webhooks("PATCH"):
+                return
+            self._json(404, {"error": "not found"})
+
         def do_DELETE(self):
-            if self._is_basic() and self._printnode_delete():
+            if self._is_basic() and (self._printapi_webhooks("DELETE") or self._printapi_delete()):
+                return
+            if self._org_webhooks("DELETE"):
                 return
             mc = _CLOUDPRNT.match(self.path.split("?", 1)[0])
             if mc:
@@ -1131,8 +1224,30 @@ def _hook_post(url, body):
     return _http_post(url, body, timeout=10)   # background sender: shorter than the 30s default
 
 
-def start_webhook_dispatcher(conn, *, post=_hook_post, interval_s=5, max_attempts=5,
-                             online_window_s=60):
+def _event_post(url, body, headers):
+    return _http_post(url, body, timeout=10, headers=headers)
+
+
+def deliver_webhook_events(conn, post, now=None):
+    """One pass of account-webhook delivery: every due event, one POST per target carrying all of
+    that target's events as a JSON array (the compatible batching), the secret in a header. Any 2xx
+    counts as delivered — the original API also wants a status reply header (docs/printapi-compat.md);
+    we do not insist, so a plain receiver works too."""
+    targets = {}
+    for ev in store.due_webhook_events(conn, now=now):
+        targets.setdefault((ev["url"], ev["secret"]), []).append(ev)
+    for (url, secret), evs in targets.items():
+        try:
+            post(url, [printapi.webhook_event(e) for e in evs], {webhooks.SECRET_HEADER: secret})
+            ok = True
+        except Exception as e:
+            ok = False
+            print(f"webhook -> {url} failed ({len(evs)} events): {e}", file=sys.stderr)
+        store.webhook_request_done(conn, [e["id"] for e in evs], ok, now=now)
+
+
+def start_webhook_dispatcher(conn, *, post=_hook_post, post_event=_event_post, interval_s=5,
+                             max_attempts=5, online_window_s=60):
     # ponytail: one thread, sequential delivery — a slow callback delays the ones behind it (bounded
     # by the 10s timeout x attempt cap). A worker pool / async delivery only if hook volume grows.
     def loop():
@@ -1140,6 +1255,7 @@ def start_webhook_dispatcher(conn, *, post=_hook_post, interval_s=5, max_attempt
             try:
                 deliver_webhooks(conn, post, max_attempts)
                 deliver_agent_events(conn, post, online_window_s)
+                deliver_webhook_events(conn, post_event)
             except Exception as e:
                 print(f"webhook dispatcher error: {e}", file=sys.stderr)
             time.sleep(interval_s)

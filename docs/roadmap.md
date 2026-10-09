@@ -5,6 +5,8 @@ v1 is deliberately small (see [CONTRIBUTING.md](../CONTRIBUTING.md) for the YAGN
 ## Shipped since v1.0
 
 - ~~**Webhooks**~~ ✅ (per-job `callback_url`; best-effort retried delivery on terminal states; unsigned).
+- ~~**Account webhooks**~~ ✅ PrintNode-style: up to 5 per org, `computer state` + `print job state`,
+  batched JSON arrays, secret in `X-Webhook-Secret`, one retry. Settings page + `/webhooks` compat API.
 - ~~**Job cancel**~~ ✅ (`DELETE /jobs/{id}` while queued; `cancelled` state; `409` once claimed).
 - ~~**`/metrics`**~~ ✅ Prometheus text format.
 - ~~**Job options**~~ ✅ `copies` + `options` on pdf jobs (`duplex`, `paper`, `bin`, `color`, `pages`),
@@ -24,7 +26,7 @@ v1 is deliberately small (see [CONTRIBUTING.md](../CONTRIBUTING.md) for the YAGN
 - ~~**E-commerce auto-print**~~ ✅ `POST /orders` + packing-slip renderer, WooCommerce plugin,
   Shopify webhook. See [ecommerce.md](ecommerce.md).
 - ~~**PrintNode-compatible API**~~ ✅ the same endpoints in PrintNode's JSON shapes, selected by
-  HTTP Basic auth. See [printnode-compat.md](printnode-compat.md).
+  HTTP Basic auth. See [printapi-compat.md](printapi-compat.md).
 - ~~**File backend**~~ ✅ a `file://` printer target writes the job to a directory instead of
   printing it. See [agent.md](agent.md#file-output-virtual-print-server).
 - ~~**Org accounts**~~ ✅ e-mail/password login, session tokens, org-scoped key and user
@@ -81,7 +83,7 @@ order of pull:
 7. ~~**PrintNode API compatibility layer**~~ ✅ **shipped** — `/whoami`, `/computers`, `/printers`,
    `POST|GET|DELETE /printjobs` and `/printjobs/{set}/states` in their JSON shapes, selected by auth
    scheme (HTTP Basic → compat, `Bearer` → ours), so a client with a configurable base URL needs one
-   line changed. See [printnode-compat.md](printnode-compat.md). Left open: plugins that hardcode
+   line changed. See [printapi-compat.md](printapi-compat.md). Left open: plugins that hardcode
    their hostname still need a proxy/DNS override, state *history* is single-entry, and scales /
    credits / child accounts are not portable.
 8. ~~**File backend ("virtual print server")**~~ ✅ **shipped** — a `file:///path/to/dir` printer

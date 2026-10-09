@@ -73,6 +73,22 @@ export type Org = {
   created_at: number;
 };
 
+/** An account webhook (printapi-compatible). `messages` is ["*"] or a subset of the two types. */
+export type WebhookMessage = "computer state" | "print job state";
+export type Webhook = {
+  id: number;
+  org_id: number;
+  url: string;
+  secret: string;
+  messages: ("*" | WebhookMessage)[];
+  received_events: number;
+  dropped_events: number;
+  successful_requests: number;
+  failed_requests: number;
+  created_at: number;
+};
+export type WebhookInput = Pick<Webhook, "url" | "secret" | "messages">;
+
 /** A billing plan from the operator's catalogue. `jobs` null = unlimited; the checkout URL
  *  already carries this org's id, so the provider's webhook can name it back. */
 export type Plan = {
@@ -253,6 +269,20 @@ export const updateOrg = (
     plan?: string;
   },
 ) => request(`/orgs/${id}`, { ...jsonBody(patch), method: "PUT" });
+
+export const listWebhooks = (orgId: number) =>
+  getJSON<{ webhooks: Webhook[] }>(`/orgs/${orgId}/webhooks`).then((r) => r.webhooks ?? []);
+
+export const createWebhook = (orgId: number, hook: WebhookInput) =>
+  request(`/orgs/${orgId}/webhooks`, jsonBody(hook)).then((r) => r.json() as Promise<Webhook>);
+
+export const updateWebhook = (orgId: number, id: number, patch: Partial<WebhookInput>) =>
+  request(`/orgs/${orgId}/webhooks/${id}`, { ...jsonBody(patch), method: "PATCH" }).then(
+    (r) => r.json() as Promise<Webhook>,
+  );
+
+export const deleteWebhook = (orgId: number, id: number) =>
+  request(`/orgs/${orgId}/webhooks/${id}`, { method: "DELETE" });
 
 /** The plan catalogue plus the caller's current plan. Empty on a server without billing. */
 export const listPlans = () => getJSON<{ plans: Plan[]; current: string | null }>("/plans");
