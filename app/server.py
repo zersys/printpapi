@@ -1011,13 +1011,18 @@ def make_handler(*, conn, token, agent_auth=store.authenticate_agent, fetch_url=
                 # already-registered agent's polling — add an agent-only key kind, checked on every
                 # agent request, if either matters.
                 row = store.authenticate_client(conn, key)
-                # First contact binds name->key; re-register requires the same key.
+                # The key is the agent's identity: first contact binds it, the same key under a
+                # new name renames that agent, and a second live PC on one key is refused (409).
                 try:
                     reg = store.register_agent(conn, body.get("name"), key,
                                                body.get("printers", []),
-                                               org_id=row["org_id"] if row else store.DEFAULT_ORG)
+                                               org_id=row["org_id"] if row else store.DEFAULT_ORG,
+                                               machine=body.get("machine"),
+                                               online_window_s=online_window_s)
                 except store.AuthError as e:
                     return self._json(401, {"error": str(e)})
+                except store.KeyInUse as e:
+                    return self._json(409, {"error": str(e)})
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
                 except sqlite3.IntegrityError:

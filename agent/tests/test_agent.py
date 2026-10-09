@@ -717,14 +717,16 @@ def test_main_registers_with_retry_and_starts_the_poll_loop(monkeypatch, tmp_pat
     monkeypatch.setattr(print_agent, "load_config", lambda base_dir: cfg)
     monkeypatch.setattr(print_agent, "select_backend", lambda **_: ("raw_fn", "pdf_fn"))
     monkeypatch.setattr(print_agent, "add_capabilities", lambda printers, fn: printers)
+    monkeypatch.setattr(print_agent, "machine_info", lambda: {"id": "m1", "hostname": "PC"})
     # main() also runs the real configure_http(*http_settings(cfg)), which would otherwise
     # overwrite module-level _HTTP with the default values and leak past this test.
     monkeypatch.setattr(print_agent, "_HTTP", {"headers": {}, "timeout": 60.0})
 
     calls = []
 
-    def fake_retry(base, key, name, printers):
+    def fake_retry(base, key, name, printers, machine=None):
         calls.append(("register", base, key, name, printers))
+        calls.append(("machine", machine))
         return {"computer_id": 9, "printer_ids": {"p": 1}}
     monkeypatch.setattr(print_agent, "register_with_retry", fake_retry)
 
@@ -741,7 +743,8 @@ def test_main_registers_with_retry_and_starts_the_poll_loop(monkeypatch, tmp_pat
 
     assert calls[0] == ("register", "https://x", "k", "agent",
                         [{"name": "p", "can_pdf": False, "target": "p"}])
-    assert calls[1] == ("poll", "https://x", "k",
+    assert calls[1] == ("machine", {"id": "m1", "hostname": "PC"})
+    assert calls[2] == ("poll", "https://x", "k",
                         {1: {"name": "p", "can_pdf": False, "target": "p"}})
 
 
@@ -860,3 +863,75 @@ def test_printers_line_may_be_omitted_and_means_auto(tmp_path):
     (tmp_path / "agent.ini").write_text("[agent]\nserver_url=https://x\napi_key=k\n")
     cfg = print_agent.load_config(str(tmp_path))
     assert print_agent.printers_spec(cfg) == "auto"
+
+
+# --- machine identity: which PC holds this key ----------------------------------------------------
+
+def test_raw_machine_id_per_platform():
+    reg = lambda: "  4c4c4544-0042-3510-8051-b4c04f4b4d32 \n"
+    assert print_agent.raw_machine_id("win32", read_registry=reg) == \
+        "4c4c4544-0042-3510-8051-b4c04f4b4d32"
+
+    files = {"/etc/machine-id": "0123abcd\n"}
+
+    def read_file(path):
+        if path not in files:
+            raise FileNotFoundError(path)
+        return files[path]
+    assert print_agent.raw_machine_id("linux", read_file=read_file) == "0123abcd"
+    files = {"/var/lib/dbus/machine-id": "dbus-id\n"}               # older distros
+    assert print_agent.raw_machine_id("linux", read_file=read_file) == "dbus-id"
+
+    class R:
+        stdout = b'  "IOPlatformUUID" = "564D1E37-7F2A-4F7B-9D3C-0A1B2C3D4E5F"\n'
+    assert print_agent.raw_machine_id("darwin", run=lambda *a, **k: R()) == \
+        "564D1E37-7F2A-4F7B-9D3C-0A1B2C3D4E5F"
+
+
+def test_raw_machine_id_unreadable_is_none():
+    def boom(*a, **k):
+        raise OSError("nope")
+    assert print_agent.raw_machine_id("win32", read_registry=boom) is None
+    assert print_agent.raw_machine_id("linux", read_file=boom) is None
+    assert print_agent.raw_machine_id("darwin", run=boom) is None
+
+
+def test_mac_address_formats_and_skips_a_random_one():
+    assert print_agent.mac_address(lambda: 0x001A2B3C4D5E) == "00:1a:2b:3c:4d:5e"
+    # uuid.getnode() falls back to a random number with the multicast bit set when it finds no
+    # NIC; that is not this PC's address.
+    assert print_agent.mac_address(lambda: 0x011A2B3C4D5E) is None
+
+
+def test_machine_info_hashes_the_id_and_describes_the_pc():
+    info = print_agent.machine_info(raw_id=lambda: "4c4c4544", hostname=lambda: "DESKTOP-A",
+                                    mac=lambda: "00:1a:2b:3c:4d:5e", os_name=lambda: "Windows-11")
+    assert len(info["id"]) == 32 and "4c4c4544" not in info["id"]      # never the raw id
+    assert info["id"] == print_agent.machine_info(raw_id=lambda: "4c4c4544")["id"]  # stable
+    assert {k: info[k] for k in ("hostname", "mac", "os")} == {
+        "hostname": "DESKTOP-A", "mac": "00:1a:2b:3c:4d:5e", "os": "Windows-11"}
+    assert "id" not in print_agent.machine_info(raw_id=lambda: None)
+
+
+def test_register_sends_the_machine_block():
+    sent = {}
+    print_agent.register("https://x", "k", "pc", [], machine={"id": "m"},
+                         http_post=lambda url, key, body: sent.update(body) or {})
+    assert sent == {"name": "pc", "printers": [], "machine": {"id": "m"}}
+
+
+def test_http_error_carries_the_servers_reason(monkeypatch):
+    import io, urllib.error
+
+    def refuse(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(
+            b'{"error": "this agent key is in use by another computer"}'))
+    monkeypatch.setattr(print_agent.urllib.request, "urlopen", refuse)
+    with pytest.raises(OSError, match="409: this agent key is in use by another computer"):
+        print_agent._req("https://x/agent/register", "k", data=b"{}")
+
+    def html(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, io.BytesIO(b"<html>"))
+    monkeypatch.setattr(print_agent.urllib.request, "urlopen", html)
+    with pytest.raises(OSError, match=r"^server returned 502$"):
+        print_agent._req("https://x/agent/jobs", "k")

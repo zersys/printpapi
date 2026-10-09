@@ -144,18 +144,19 @@ def test_reaper_logs_failures(capsys, monkeypatch):
     assert "reaper" in capsys.readouterr().err
 
 
-def test_register_duplicate_key_returns_409():
+def test_register_same_key_new_name_renames_the_agent():
     conn = _mem()
     httpd, base = _serve(conn)
     try:
-        # Register agent "a" with key "k"
-        code, _ = _areq("POST", base + "/agent/register", "k",
-                         {"name": "a", "printers": []})
+        code, first = _areq("POST", base + "/agent/register", "k",
+                            {"name": "a", "printers": []})
         assert code == 200
-        # Register agent "b" with the SAME key "k" -> 409
-        code, raw = _areq("POST", base + "/agent/register", "k",
-                           {"name": "b", "printers": []})
-        assert code == 409
+        # The SAME key under a new name is the same agent renamed (name = auto on a PC that was
+        # registered by hand) - not a second agent. A second *live PC* on one key is still a 409,
+        # see tests/test_agent_identity.py.
+        code, again = _areq("POST", base + "/agent/register", "k",
+                            {"name": "b", "printers": []})
+        assert (code, again) == (200, first)
     finally:
         httpd.shutdown()
 

@@ -57,7 +57,7 @@ Token comparison is constant-time (`hmac.compare_digest`).
 | `POST /apikeys` | manage | Issue a client key → `{id, label, org_id, key}` (key shown once) |
 | `GET /apikeys` | manage | List keys with their org (never the secret) |
 | `DELETE /apikeys/{id}` | manage | Revoke a key |
-| `POST /agent/register` | agent | Declare name + printers → `{computer_id, printer_ids}` |
+| `POST /agent/register` | agent | Declare name + printers (+ optional `machine`) → `{computer_id, printer_ids}`. Same key + new name renames; a second online PC on one key is `409` ([agent docs](agent.md#one-key-per-pc)) |
 | `GET /agent/jobs` | agent | Long-poll for a job (204 on timeout) |
 | `GET /agent/jobs/{id}/payload` | agent | Download the job's bytes |
 | `POST /agent/jobs/{id}/result` | agent | Report `{ok, error?}` |
@@ -200,7 +200,8 @@ the superset.
 ```bash
 curl -s localhost:3460/computers -H 'Authorization: Bearer <client-key>'
 # -> {"computers":[{"id":1,"name":"warehouse-pc","online":true,"last_seen_at":1753.., 
-#                  "created_at":1750..,"printers":2}]}
+#                  "created_at":1750..,"printers":2,
+#                  "machine":{"id":"0288b35a…","hostname":"DESKTOP-A","mac":"00:1a:…","os":"Windows-11…"}}]}
 ```
 
 `online` means the agent polled or registered within the liveness window (60 s). Scoped to the

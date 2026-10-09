@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS password_resets(
 CREATE TABLE IF NOT EXISTS agents(
   id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, name TEXT NOT NULL,
   api_key_hash TEXT NOT NULL UNIQUE, last_seen_at REAL,
-  offline_notified INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL);
+  offline_notified INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, machine TEXT);
 CREATE TABLE IF NOT EXISTS printers(
   id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, agent_id INTEGER NOT NULL,
   name TEXT NOT NULL, can_pdf INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'active',
@@ -105,7 +105,8 @@ def init_db(conn):
                         "ALTER TABLE users ADD COLUMN password_hash TEXT",
                         "CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email)",
                         "ALTER TABLE orgs ADD COLUMN job_quota INTEGER",
-                        "ALTER TABLE orgs ADD COLUMN plan TEXT"):
+                        "ALTER TABLE orgs ADD COLUMN plan TEXT",
+                        "ALTER TABLE agents ADD COLUMN machine TEXT"):
                 try:
                     conn.execute(ddl)
                 except sqlite3.OperationalError:
@@ -264,25 +265,69 @@ def _hash_key(api_key):
     return hashlib.sha256(api_key.encode()).hexdigest()
 
 
-def register_agent(conn, name, api_key, printers, org_id=DEFAULT_ORG):
-    now = time.time()
+class KeyInUse(Exception):
+    """An agent key presented by a second computer while the first is still online."""
+
+
+_MACHINE_KEYS = ("id", "hostname", "mac", "os")
+
+
+def _machine(info):
+    """The agent's self-description, cleaned: known keys, strings only, bounded. It identifies
+    *which* PC holds a key for display and the shared-key check — it is never a credential (it is
+    trivially spoofed), so junk is dropped rather than refused."""
+    if not isinstance(info, dict):
+        return None
+    out = {k: info[k][:128] for k in _MACHINE_KEYS if isinstance(info.get(k), str) and info[k]}
+    return out or None
+
+
+def register_agent(conn, name, api_key, printers, org_id=DEFAULT_ORG, machine=None,
+                   online_window_s=60, now=None):
+    """Enrol or re-touch the agent that holds `api_key`, with its printers.
+
+    The key is the agent's identity, so the same key under a new name is that agent *renamed*
+    (ids kept) — e.g. `name = auto` on a PC first registered by hand. Refused: a name another
+    agent of the org holds (AuthError), and a second computer presenting the key while the
+    first is still online (KeyInUse) — two PCs on one key would take each other's jobs. Once
+    the first is offline the new machine takes the key over: that is a replaced PC."""
+    now = time.time() if now is None else now
     key_hash = _hash_key(api_key)
+    machine = _machine(machine)
     for p in printers:
         if "name" not in p:
             raise ValueError(f"printer entry missing 'name': {p!r}")
     with _LOCK:
         try:
-            row = conn.execute("SELECT id, api_key_hash FROM agents WHERE org_id=? AND name=?",
-                               (org_id, name)).fetchone()
-            if row:
-                if not hmac.compare_digest(row["api_key_hash"], key_hash):
-                    raise AuthError(f"agent name already registered with a different key: {name!r}")
-                agent_id = row["id"]
-                conn.execute("UPDATE agents SET last_seen_at=? WHERE id=?", (now, agent_id))
+            mine = conn.execute("SELECT id, org_id, name, last_seen_at, machine FROM agents "
+                                "WHERE api_key_hash=?", (key_hash,)).fetchone()
+            named = conn.execute("SELECT id, api_key_hash FROM agents WHERE org_id=? AND name=?",
+                                 (org_id, name)).fetchone()
+            if named and not hmac.compare_digest(named["api_key_hash"], key_hash):
+                raise AuthError(f"agent name already registered with a different key: {name!r}")
+            if mine and mine["org_id"] != org_id:
+                raise KeyInUse("agent key already in use by an agent of another org")
+            if mine:
+                agent_id = mine["id"]
+                known = json.loads(mine["machine"]) if mine["machine"] else {}
+                online = mine["last_seen_at"] is not None and \
+                    now - mine["last_seen_at"] <= online_window_s
+                if machine and machine.get("id") and known.get("id") \
+                        and machine["id"] != known["id"] and online:
+                    raise KeyInUse(
+                        f"this agent key is in use by another computer "
+                        f"({known.get('hostname') or mine['name']}, online now) - give each PC "
+                        f"its own key")
+                if machine and "id" not in machine and known.get("id"):
+                    machine = dict(machine, id=known["id"])   # could not read it this time
+                conn.execute("UPDATE agents SET name=?, last_seen_at=?, machine=? WHERE id=?",
+                             (name, now, json.dumps(machine) if machine else mine["machine"],
+                              agent_id))
             else:
                 cur = conn.execute(
-                    "INSERT INTO agents(org_id, name, api_key_hash, last_seen_at, created_at) "
-                    "VALUES(?,?,?,?,?)", (org_id, name, key_hash, now, now))
+                    "INSERT INTO agents(org_id, name, api_key_hash, last_seen_at, created_at, "
+                    "machine) VALUES(?,?,?,?,?,?)",
+                    (org_id, name, key_hash, now, now, json.dumps(machine) if machine else None))
                 agent_id = cur.lastrowid
             printer_ids = {}
             for p in printers:
@@ -897,12 +942,13 @@ def list_agents(conn, online_window_s, now=None, org_id=None):
     now = time.time() if now is None else now
     with _LOCK:
         rows = conn.execute(
-            "SELECT a.id, a.name, a.last_seen_at, a.created_at, "
+            "SELECT a.id, a.name, a.last_seen_at, a.created_at, a.machine, "
             "(SELECT COUNT(*) FROM printers p WHERE p.agent_id = a.id) AS printers "
             "FROM agents a WHERE (:org IS NULL OR a.org_id = :org) ORDER BY a.id",
             {"org": org_id}).fetchall()
     return [{"id": r["id"], "name": r["name"], "last_seen_at": r["last_seen_at"],
              "created_at": r["created_at"], "printers": r["printers"],
+             "machine": json.loads(r["machine"]) if r["machine"] else None,
              "online": r["last_seen_at"] is not None and (now - r["last_seen_at"]) <= online_window_s}
             for r in rows]
 

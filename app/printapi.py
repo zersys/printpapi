@@ -95,8 +95,9 @@ def capabilities(caps):
 def computer(agent):
     """A `store.list_agents()` row -> compatible computer object. The network fields are null: our
     agent reports its name and its printers, not its interfaces."""
+    machine = agent.get("machine") or {}
     return {"id": agent["id"], "name": agent["name"], "inet": None, "inet6": None,
-            "hostname": agent["name"], "version": "", "jre": None,
+            "hostname": machine.get("hostname") or agent["name"], "version": "", "jre": None,
             "createTimestamp": _iso(agent["created_at"]),
             "state": "connected" if agent["online"] else "disconnected"}
 

@@ -16,6 +16,10 @@ export type Printer = {
 };
 
 /** An agent machine. `printers` is a count here — the devices page pairs it with /printers. */
+/** What the agent reported about its PC at register. `id` is a hash of the OS machine id —
+ *  it tells two PCs apart, it is not a credential. Older agents send nothing. */
+export type Machine = { id?: string; hostname?: string; mac?: string; os?: string };
+
 export type Computer = {
   id: number;
   name: string;
@@ -23,6 +27,7 @@ export type Computer = {
   last_seen_at: number | null;
   created_at: number;
   printers: number;
+  machine: Machine | null;
 };
 
 export type Job = {

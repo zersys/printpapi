@@ -19,9 +19,25 @@ only** — nothing listens on the printer's machine, so NAT/firewalls are no pro
 
 ## agent.ini
 
-`name = auto` registers under this computer's name. Leaving `name` out keeps the old default,
-`agent`: the server binds a key to its name on first contact, so an existing install that is
-silently renamed would be refused (`409`).
+`name = auto` registers under this computer's name; leaving `name` out keeps the old default,
+`agent`. Changing the name later is fine: the key is the agent's identity, so the same key under a
+new name **renames** that computer and keeps its printer ids.
+
+### One key per PC
+
+Each PC needs its own key (dashboard → **API Keys**). On register the agent also reports which PC
+it is running on: a hash of the OS machine id (Windows `MachineGuid`, Linux `/etc/machine-id`,
+macOS hardware UUID), plus hostname, MAC and OS for the Devices page. With that the server tells
+two PCs apart:
+
+- same key, same PC, new name → renamed, ids kept;
+- same key from a **second PC while the first is online** → `409 this agent key is in use by
+  another computer (…) - give each PC its own key`;
+- same key from a new PC once the old one is **offline** → it takes the key over (a replaced
+  machine: copy the agent folder across and start it).
+
+The machine id identifies, it does not authenticate — it is easy to fake, so the key stays the
+only credential. A PC that cannot read its id still registers; it just isn't checked.
 
 ```ini
 [agent]

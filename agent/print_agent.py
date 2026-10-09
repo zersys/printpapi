@@ -1,7 +1,9 @@
 # printpapi — self-hosted PrintNode alternative. Elastic License 2.0 (see LICENSE).
 import configparser
+import hashlib
 import json
 import os
+import platform
 import socket
 import subprocess
 import sys
@@ -9,6 +11,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 _UA = "printpapi-agent"
 
@@ -333,7 +336,13 @@ def _req(url, key, *, data=None, method="GET", as_bytes=False):
                 return None
             return raw if as_bytes else (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as e:
-        raise OSError(f"server returned {e.code}") from e
+        # The server says *why* in a JSON {"error": ...} body; a proxy's HTML page says nothing
+        # useful, so then the bare status it is.
+        try:
+            reason = json.loads(e.read() or b"{}").get("error")
+        except Exception:
+            reason = None
+        raise OSError(f"server returned {e.code}" + (f": {reason}" if reason else "")) from e
     except urllib.error.URLError as e:
         raise OSError(f"connection failed: {e.reason}") from e
 
@@ -350,8 +359,76 @@ def _post(url, key, body):
     return _req(url, key, data=json.dumps(body).encode(), method="POST")
 
 
-def register(base, key, name, printers, http_post=_post):
-    return http_post(base + "/agent/register", key, {"name": name, "printers": printers})
+def _read_machine_guid():
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0,
+                        winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+        return winreg.QueryValueEx(k, "MachineGuid")[0]
+
+
+def _read_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def raw_machine_id(platform_name=sys.platform, *, read_registry=_read_machine_guid,
+                   read_file=_read_text, run=subprocess.run):
+    """The OS's own id for this computer, or None. Stable across reboots, renames and network
+    changes - unlike a MAC address (Wi-Fi vs cable, docks, VPNs, Windows' random MACs).
+    Windows: MachineGuid (new on reinstall). Linux: machine-id. macOS: the hardware UUID."""
+    try:
+        if platform_name.startswith("win"):
+            return read_registry().strip() or None
+        if platform_name == "darwin":
+            out = run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True,
+                      check=True, timeout=10).stdout.decode(errors="replace")
+            for line in out.splitlines():
+                if "IOPlatformUUID" in line:
+                    return line.split("=", 1)[1].strip().strip('"') or None
+            return None
+        for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                return read_file(path).strip() or None
+            except OSError:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+def mac_address(getnode=uuid.getnode):
+    """This PC's MAC as aa:bb:..., or None when uuid.getnode() had to make one up (it then sets
+    the multicast bit). Display only: which NIC answers first can change."""
+    node = getnode()
+    if (node >> 40) & 1:
+        return None
+    return ":".join(f"{(node >> s) & 0xFF:02x}" for s in range(40, -1, -8))
+
+
+def machine_info(*, raw_id=raw_machine_id, hostname=socket.gethostname, mac=mac_address,
+                 os_name=platform.platform):
+    """What the server learns about this PC at register: which computer holds the key (so a
+    second PC on the same key is caught) and what to show on the Devices page. The OS id is sent
+    hashed - the server only compares it, it never needs the raw value."""
+    info = {}
+    rid = raw_id()
+    if rid:
+        info["id"] = hashlib.sha256(f"printpapi-machine:{rid}".encode()).hexdigest()[:32]
+    for k, fn in (("hostname", hostname), ("mac", mac), ("os", os_name)):
+        try:
+            v = fn()
+        except Exception:
+            v = None
+        if v:
+            info[k] = v
+    return info
+
+
+def register(base, key, name, printers, http_post=_post, machine=None):
+    body = {"name": name, "printers": printers}
+    if machine:
+        body["machine"] = machine
+    return http_post(base + "/agent/register", key, body)
 
 
 def _log_error(msg):
@@ -366,7 +443,7 @@ def _log_error(msg):
 
 
 def register_with_retry(base, key, name, printers, *, http_post=_post, sleep=time.sleep,
-                        log=_log_error, max_wait=300):
+                        log=_log_error, max_wait=300, machine=None):
     """register() until it works. At boot the network (or an auth proxy) is often not there yet;
     a one-shot register killed the process, and a logon-triggered task never restarted it.
     Retries on anything - OSError (network/HTTP status) and ValueError (a proxy's HTML page
@@ -376,7 +453,7 @@ def register_with_retry(base, key, name, printers, *, http_post=_post, sleep=tim
     attempt = 0
     while True:
         try:
-            reg = register(base, key, name, printers, http_post=http_post)
+            reg = register(base, key, name, printers, http_post=http_post, machine=machine)
             if not isinstance(reg, dict) or not isinstance(reg.get("printer_ids"), dict) \
                     or "computer_id" not in reg:
                 raise ValueError(f"unexpected register reply: {reg!r:.200}")
@@ -534,7 +611,7 @@ def main():
     raw_fn, pdf_fn = select_backend(sumatra=sumatra)
     printers = resolve_printers(printers_spec(agent_cfg), select_discoverer())
     add_capabilities(printers, select_caps_collector())
-    reg = register_with_retry(base, key, name, printers)
+    reg = register_with_retry(base, key, name, printers, machine=machine_info())
     entry_by_name = {p["name"]: p for p in printers}
     printer_by_id = {pid: entry_by_name[pname] for pname, pid in reg["printer_ids"].items()}
     print(f"print-agent registered as computer {reg['computer_id']}, printers={printer_by_id}")

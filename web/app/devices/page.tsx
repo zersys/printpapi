@@ -6,7 +6,13 @@ import { AnimatePresence, motion } from "motion/react";
 import { toast } from "sonner";
 import { Check, FileText, Loader2, Printer, Server, Zap } from "lucide-react";
 import { usePoll } from "@/hooks/use-poll";
-import { createJob, listComputers, listPrinters, type Printer as PrinterT } from "@/lib/api";
+import {
+  createJob,
+  listComputers,
+  listPrinters,
+  type Machine,
+  type Printer as PrinterT,
+} from "@/lib/api";
 import { fmtAgo } from "@/lib/format";
 import { testJob } from "@/lib/testdoc";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,8 +26,22 @@ type AgentGroup = {
   name: string;
   online: boolean;
   last_seen_at: number | null;
+  machine: Machine | null;
   printers: PrinterT[];
 };
+
+/** "DESKTOP-AB12 · Windows-11-10.0.26100 · 00:1a:2b:3c:4d:5e · id 4c4c4544" — whichever parts
+ *  the agent reported. The hostname is left out when the agent is already named after it. */
+function describeMachine(name: string, m: Machine | null) {
+  if (!m) return null;
+  const parts = [
+    m.hostname && m.hostname !== name ? m.hostname : null,
+    m.os,
+    m.mac,
+    m.id ? `id ${m.id.slice(0, 8)}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
 
 export default function DevicesPage() {
   const { data: printers, loading, refresh } = usePoll(listPrinters, 5000);
@@ -42,6 +62,7 @@ export default function DevicesPage() {
         name: g.name,
         online: g.printers.some((p) => p.online),
         last_seen_at: null,
+        machine: null,
         printers: g.printers,
       }));
     }
@@ -50,6 +71,7 @@ export default function DevicesPage() {
       name: c.name,
       online: c.online,
       last_seen_at: c.last_seen_at,
+      machine: c.machine ?? null,
       printers: byAgent.get(c.id)?.printers ?? [],
     }));
   }, [printers, computers]);
@@ -103,6 +125,14 @@ export default function DevicesPage() {
               {agent.printers.length === 1 ? "printer" : "printers"}
             </span>
           </div>
+          {describeMachine(agent.name, agent.machine) && (
+            <p
+              className="-mt-1.5 mb-2.5 font-mono text-xs text-muted-foreground"
+              title="Reported by the agent. The id is a hash of the PC's own machine id."
+            >
+              {describeMachine(agent.name, agent.machine)}
+            </p>
+          )}
           {agent.printers.length === 0 ? (
             <Card>
               <CardContent className="px-4 text-sm text-muted-foreground">
